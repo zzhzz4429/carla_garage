@@ -325,10 +325,13 @@ class UnifiedRiskManager:
             risk_level = 'safe'
             
         # 6. Add to risk history for temporal analysis
+        # Use the max of TTC and signal risks as external_risk for backward compatibility
+        external_risk_for_history = max(fused_ttc_risk, suppressed_signal_risk)
+        
         risk_entry = {
             'timestamp': current_time,
             'unified_risk': unified_risk,
-            'external_risk': external_risk,
+            'external_risk': external_risk_for_history,
             'internal_risk': internal_risk,
             'risk_level': risk_level
         }
