@@ -99,7 +99,20 @@ class SafetyEvaluator:
         Returns:
             tuple: (max_signal_risk, signal_info) where signal_info contains detailed data
         """
+        # **SIGNAL TRACKING for violation detection**
+        # Initialize tracking variables if not exists
+        if not hasattr(self, '_tracked_signals'):
+            self._tracked_signals = {}  # {signal_id: last_seen_data}
+            self._frame_count = 0
+        
+        self._frame_count += 1
+        current_frame_signals = set()
+        
         if not bounding_boxes:
+            # **CHECK FOR VIOLATIONS: signals that disappeared**
+            violation_info = self._check_signal_disappearance(ego_speed)
+            if violation_info:
+                return 1.0, violation_info
             return 0.0, None
             
         max_signal_risk = 0.0
@@ -112,6 +125,11 @@ class SafetyEvaluator:
         CRITICAL_DECEL_THRESHOLD = 8.0    # m/s² - Critical level (hard braking)
         EMERGENCY_DECEL_THRESHOLD = 10.0  # m/s² - Emergency level (maximum braking)
         
+        # **DEBUG: Log distance values to file for analysis**
+        if not hasattr(self, '_violation_debug_count'):
+            self._violation_debug_count = 0
+            self._debug_file = None
+        
         for i, bb in enumerate(bounding_boxes):
             # Only consider traffic lights (2) and stop signs (3)
             if bb[7] not in [2, 3]:
@@ -121,10 +139,19 @@ class SafetyEvaluator:
             d_to_stop_line = bb[0]  # x-coordinate is distance to stop line
             signal_type = "Red Light" if bb[7] == 2 else "Stop Sign"
             
-            # **DEBUG: Log distance values to file for analysis**
-            if not hasattr(self, '_violation_debug_count'):
-                self._violation_debug_count = 0
-                self._debug_file = None
+            # **TRACK SIGNAL for violation detection**
+            signal_id = f"{signal_type}_{bb[1]:.1f}"  # Use y-coordinate to distinguish signals
+            current_frame_signals.add(signal_id)
+            
+            # Update tracking data
+            self._tracked_signals[signal_id] = {
+                'distance': d_to_stop_line,
+                'signal_type': signal_type,
+                'last_seen_frame': self._frame_count,
+                'position': (bb[0], bb[1]),
+                'approaching': d_to_stop_line > 0 and d_to_stop_line < 50.0,  # Within 50m range
+                'ego_speed': ego_speed
+            }
             
             self._violation_debug_count += 1
             
@@ -149,47 +176,16 @@ class SafetyEvaluator:
             self._debug_file.write(f"{self._violation_debug_count}, {signal_type}, {d_to_stop_line:.3f}, {status}\n")
             self._debug_file.flush()  # Ensure immediate write
             
-            # **SIMPLE VIOLATION DETECTION**
+            # **DIRECT VIOLATION DETECTION** (if it ever works)
             # If distance < 0, vehicle has passed through stop line → VIOLATION
             if d_to_stop_line < 0.0:
                 # Log violation trigger to file
-                self._debug_file.write(f"VIOLATION TRIGGERED: {signal_type} at {d_to_stop_line:.3f}m\n")
+                self._debug_file.write(f"DIRECT VIOLATION TRIGGERED: {signal_type} at {d_to_stop_line:.3f}m\n")
                 self._debug_file.flush()
                 
-                # This is a violation - vehicle ran through the signal
-                violation_info = {
-                    'index': i,
-                    'signal_type': signal_type,
-                    'distance_to_stop_line': d_to_stop_line,  # Negative = past stop line
-                    'distance': d_to_stop_line,  # For backward compatibility with display
-                    'required_deceleration': 0.0,  # Already past, no deceleration can help
-                    'signal_risk': 1.0,  # Maximum risk - violation occurred
-                    'alert_level': 'VIOLATION',
-                    'position': (bb[0], bb[1]),
-                    'violation_detected': True,  # Flag for logging
-                    'ego_speed_at_violation': ego_speed,
-                    
-                    # **THRESHOLD FLAGS** - all false since violation already occurred
-                    'is_cautious': False,
-                    'is_warning': False,
-                    'is_critical': False,
-                    'is_emergency': False,
-                    
-                    # **THRESHOLDS** - for reference
-                    'thresholds': {
-                        'cautious': CAUTIOUS_DECEL_THRESHOLD,
-                        'warning': WARNING_DECEL_THRESHOLD,
-                        'critical': CRITICAL_DECEL_THRESHOLD,
-                        'emergency': EMERGENCY_DECEL_THRESHOLD
-                    }
-                }
-                
-                # Log violation info to file
-                self._debug_file.write(f"RETURNING VIOLATION: {violation_info}\n")
-                self._debug_file.flush()
-                
-                # Return violation immediately with maximum risk
-                return 1.0, violation_info
+                return self._create_violation_info(i, signal_type, d_to_stop_line, ego_speed, 
+                                                 CAUTIOUS_DECEL_THRESHOLD, WARNING_DECEL_THRESHOLD,
+                                                 CRITICAL_DECEL_THRESHOLD, EMERGENCY_DECEL_THRESHOLD)
             
             # Skip if too close but not violation (between 0 and 1m)
             if d_to_stop_line < 1.0:
@@ -247,7 +243,111 @@ class SafetyEvaluator:
                     }
                 }
                 
+        # **CHECK FOR VIOLATIONS: signals that disappeared**
+        violation_info = self._check_signal_disappearance(ego_speed)
+        if violation_info:
+            return 1.0, violation_info
+            
         return max_signal_risk, closest_signal_info
+    
+    def _check_signal_disappearance(self, ego_speed):
+        """
+        **NEW: Check if any tracked signals have disappeared (indicating potential violation)**
+        
+        This handles the case where bounding box detection stops tracking signals
+        once the vehicle passes them, which prevents direct distance < 0 detection.
+        """
+        if not hasattr(self, '_tracked_signals'):
+            return None
+        
+        current_frame = self._frame_count
+        violation_info = None
+        
+        # Check each tracked signal for disappearance
+        signals_to_remove = []
+        for signal_id, signal_data in self._tracked_signals.items():
+            frames_since_seen = current_frame - signal_data['last_seen_frame']
+            
+            # If signal hasn't been seen for 2+ frames AND was recently close
+            if frames_since_seen >= 2:
+                last_distance = signal_data['distance']
+                was_approaching = signal_data['approaching']
+                
+                # **VIOLATION CONDITION**: Signal was close and approaching, now disappeared
+                if was_approaching and last_distance < 5.0 and last_distance > 0:
+                    signal_type = signal_data['signal_type']
+                    
+                    # Log violation to debug file
+                    if hasattr(self, '_debug_file') and self._debug_file:
+                        self._debug_file.write(f"DISAPPEARANCE VIOLATION: {signal_type} disappeared after approaching to {last_distance:.3f}m\n")
+                        self._debug_file.flush()
+                    
+                    # Create violation info
+                    violation_info = self._create_violation_info(
+                        index=0,  # No current bounding box index
+                        signal_type=signal_type,
+                        distance=-1.0,  # Estimated as past stop line
+                        ego_speed=ego_speed,
+                        cautious_threshold=4.0,
+                        warning_threshold=6.0,
+                        critical_threshold=8.0,
+                        emergency_threshold=10.0
+                    )
+                    
+                    print(f"🚨 VIOLATION DETECTED: {signal_type} disappeared after approaching to {last_distance:.1f}m")
+                    
+                    # Remove this signal from tracking
+                    signals_to_remove.append(signal_id)
+                    break  # Return first violation found
+                
+                # Clean up old signals (not violations, just old tracking data)
+                elif frames_since_seen > 30:  # Remove after 30 frames (3 seconds at 10fps)
+                    signals_to_remove.append(signal_id)
+        
+        # Clean up signals that are no longer relevant
+        for signal_id in signals_to_remove:
+            del self._tracked_signals[signal_id]
+        
+        return violation_info
+    
+    def _create_violation_info(self, index, signal_type, distance, ego_speed, 
+                             cautious_threshold, warning_threshold, critical_threshold, emergency_threshold):
+        """
+        **NEW: Helper to create standardized violation info structure**
+        """
+        violation_info = {
+            'index': index,
+            'signal_type': signal_type,
+            'distance_to_stop_line': distance,
+            'distance': distance,  # For backward compatibility
+            'required_deceleration': 0.0,  # Already past, no deceleration can help
+            'signal_risk': 1.0,  # Maximum risk - violation occurred
+            'alert_level': 'VIOLATION',
+            'position': (distance, 0.0),
+            'violation_detected': True,
+            'ego_speed_at_violation': ego_speed,
+            
+            # **THRESHOLD FLAGS** - all false since violation already occurred
+            'is_cautious': False,
+            'is_warning': False,
+            'is_critical': False,
+            'is_emergency': False,
+            
+            # **THRESHOLDS** - for reference
+            'thresholds': {
+                'cautious': cautious_threshold,
+                'warning': warning_threshold,
+                'critical': critical_threshold,
+                'emergency': emergency_threshold
+            }
+        }
+        
+        # Log violation info to debug file
+        if hasattr(self, '_debug_file') and self._debug_file:
+            self._debug_file.write(f"CREATED VIOLATION INFO: {violation_info}\n")
+            self._debug_file.flush()
+        
+        return violation_info
         
  
         
