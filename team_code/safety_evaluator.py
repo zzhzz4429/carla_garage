@@ -87,14 +87,17 @@ class SafetyEvaluator:
         
     def calculate_signal_compliance_risk(self, ego_speed, bounding_boxes):
         """
-        Calculate risk based on signal compliance (red lights and stop signs)
+        **STRAIGHTFORWARD SIGNAL COMPLIANCE RISK - Independent of driver state**
+        
+        Calculate risk based on required deceleration to stop at traffic signals.
+        This is handled independently from TTC risk to allow different fusion strategies.
         
         Args:
             ego_speed: Current speed of the ego vehicle (m/s)
             bounding_boxes: List of detected bounding boxes
             
         Returns:
-            tuple: (max_signal_risk, closest_signal_info) where max_signal_risk is the maximum signal risk
+            tuple: (max_signal_risk, signal_info) where signal_info contains detailed data
         """
         if not bounding_boxes:
             return 0.0, None
@@ -102,33 +105,74 @@ class SafetyEvaluator:
         max_signal_risk = 0.0
         closest_signal_info = None
         
+        # **STRAIGHTFORWARD DECELERATION THRESHOLDS**
+        # Clear, intuitive thresholds based on required deceleration
+        CAUTIOUS_DECEL_THRESHOLD = 4.0    # m/s² - Start cautious alerts (comfortable braking)
+        WARNING_DECEL_THRESHOLD = 6.0     # m/s² - Warning level (firm braking)
+        CRITICAL_DECEL_THRESHOLD = 8.0    # m/s² - Critical level (hard braking)
+        EMERGENCY_DECEL_THRESHOLD = 10.0  # m/s² - Emergency level (maximum braking)
+        
         for i, bb in enumerate(bounding_boxes):
             # Only consider traffic lights (2) and stop signs (3)
             if bb[7] not in [2, 3]:
                 continue
                 
-            # Get distance to signal
-            d_i = bb[0]  # x-coordinate is distance to signal
+            # Get distance to signal (distance to STOP LINE, not the traffic light itself)
+            d_to_stop_line = bb[0]  # x-coordinate is distance to stop line
             
-            # Calculate required deceleration to stop at the signal
-            # Clamp distance to avoid division by zero
-            d_i_clamped = max(d_i, 0.5)
-            a_req = (ego_speed ** 2) / (2 * d_i_clamped)
+            # Skip if too close (already past or at stop line)
+            if d_to_stop_line < 1.0:
+                continue
             
-            # Calculate signal compliance risk
-            signal_risk = self.beta * max((a_req / self.a_safe) - 1, 0)
+            # Calculate required deceleration to stop at the stop line
+            required_deceleration = (ego_speed ** 2) / (2 * d_to_stop_line)
             
-            # Update maximum risk
+            # **STRAIGHTFORWARD RISK MAPPING**
+            # Direct mapping from required deceleration to risk level
+            signal_risk = 0.0
+            alert_level = "SAFE"
+            
+            if required_deceleration >= EMERGENCY_DECEL_THRESHOLD:
+                signal_risk = 0.95  # Emergency level - immediate action required
+                alert_level = "EMERGENCY"
+            elif required_deceleration >= CRITICAL_DECEL_THRESHOLD:
+                signal_risk = 0.8   # Critical level - hard braking needed
+                alert_level = "CRITICAL"
+            elif required_deceleration >= WARNING_DECEL_THRESHOLD:
+                signal_risk = 0.6   # Warning level - firm braking needed
+                alert_level = "WARNING" 
+            elif required_deceleration >= CAUTIOUS_DECEL_THRESHOLD:
+                signal_risk = 0.3   # Cautious level - comfortable braking needed
+                alert_level = "CAUTIOUS"
+            # Below 4.0 m/s² = normal braking, no alert needed
+            
+            # Update maximum risk (closest/most critical signal)
             if signal_risk > max_signal_risk:
                 max_signal_risk = signal_risk
                 signal_type = "Red Light" if bb[7] == 2 else "Stop Sign"
+                
                 closest_signal_info = {
                     'index': i,
                     'signal_type': signal_type,
-                    'distance': d_i,
-                    'required_deceleration': a_req,
+                    'distance_to_stop_line': d_to_stop_line,  # Clarified naming
+                    'required_deceleration': required_deceleration,
                     'signal_risk': signal_risk,
-                    'position': (bb[0], bb[1])
+                    'alert_level': alert_level,
+                    'position': (bb[0], bb[1]),
+                    
+                    # **THRESHOLD FLAGS** - for easy checking in UnifiedRiskManager
+                    'is_cautious': required_deceleration >= CAUTIOUS_DECEL_THRESHOLD,
+                    'is_warning': required_deceleration >= WARNING_DECEL_THRESHOLD,
+                    'is_critical': required_deceleration >= CRITICAL_DECEL_THRESHOLD,
+                    'is_emergency': required_deceleration >= EMERGENCY_DECEL_THRESHOLD,
+                    
+                    # **THRESHOLDS** - for reference/logging
+                    'thresholds': {
+                        'cautious': CAUTIOUS_DECEL_THRESHOLD,
+                        'warning': WARNING_DECEL_THRESHOLD,
+                        'critical': CRITICAL_DECEL_THRESHOLD,
+                        'emergency': EMERGENCY_DECEL_THRESHOLD
+                    }
                 }
                 
         return max_signal_risk, closest_signal_info
@@ -412,7 +456,12 @@ class SafetyEvaluator:
         
     def calculate_external_risk_unified(self, ego_speed, bounding_boxes):
         """
-        UNIFIED EXTERNAL RISK ASSESSMENT - TTC + Signal Compliance
+        **SEPARATED EXTERNAL RISK ASSESSMENT - TTC and Signal Compliance handled independently**
+        
+        Returns both risks separately so UnifiedRiskManager can:
+        - Apply driver state fusion to TTC risk (distracted drivers need earlier TTC warnings)
+        - Handle signal compliance risk independently (red light violation is dangerous regardless)
+        - Implement conditional alerting (TTC alerts can suppress signal alerts)
         """
         if not bounding_boxes:
             return 0.0, {
@@ -420,109 +469,63 @@ class SafetyEvaluator:
                 'signal_risk': 0.0,
                 'combined_risk': 0.0,
                 'primary_threat': None,
-                'signal_threat': None,
-                'risk_level': 'SAFE'
+                'signal_info': None,
+                'risk_level': 'SAFE',
+                'separation_mode': True  # Indicates separated risk calculation
             }
         
-        # Primary Risk Factor: TTC (main external risk)
+        # **SEPARATED RISK CALCULATIONS**
+        
+        # 1. TTC Risk - Main collision threat assessment
         ttc_risk, ttc_object = self.calculate_ttc_risk_simplified(ego_speed, bounding_boxes)
         
-        # Secondary Risk Factor: Signal Compliance (traffic lights, stop signs)
+        # 2. Signal Compliance Risk - Independent traffic law compliance  
         signal_risk, signal_object = self.calculate_signal_compliance_risk(ego_speed, bounding_boxes)
         
-        # Use TTC as the primary external risk (90% weight)
-        # Signal compliance as secondary (10% weight for advisory)
+        # **ENHANCED TTC RISK with context**
+        enhanced_ttc_risk = ttc_risk
+        if ttc_object:
+            # Emergency vehicle context boost for TTC
+            if ttc_object.get('is_emergency', False):
+                enhanced_ttc_risk *= 1.2  # 20% boost for emergency vehicles
+                print(f"  🚨 Emergency vehicle TTC - risk boosted by 20%")
+            
+            # Close proximity emergency boost
+            distance = ttc_object.get('distance', float('inf'))
+            if distance < 5.0 and ttc_risk > 0.5:
+                enhanced_ttc_risk = min(1.0, enhanced_ttc_risk * 1.3)
+                print(f"  ⚠️ Very close object ({distance:.1f}m) - TTC risk boosted")
+        
+        # **TRADITIONAL COMBINED RISK for backward compatibility**
+        # This is still calculated but UnifiedRiskManager can choose to use separated risks
         primary_weight = 0.7    # TTC risk weight
         secondary_weight = 0.3   # Signal compliance weight
+        combined_risk = (primary_weight * enhanced_ttc_risk + secondary_weight * signal_risk)
         
-        # Combined external risk
-        combined_risk = (primary_weight * ttc_risk + secondary_weight * signal_risk)
-        
-        # Context-based risk adjustments (only for TTC objects)
-        primary_threat = ttc_object
-        
-        if primary_threat:
-            # Emergency vehicle context boost
-            if primary_threat.get('is_emergency', False):
-                combined_risk *= 1.2  # 20% boost for emergency vehicles
-                print(f"  Emergency vehicle detected - risk boosted by 20%")
-            
-            # Close proximity emergency boost (only for very close objects)
-            if primary_threat['distance'] < 8.0 and combined_risk > 0.1:
-                proximity_boost = max(0.1, (8.0 - primary_threat['distance']) / 8.0 * 0.2)
-                combined_risk += proximity_boost
-                print(f"  Close proximity boost: +{proximity_boost:.3f}")
-        
-        # Cap the risk at 1.0
-        combined_risk = min(combined_risk, 1.0)
-        
-        # Determine risk level based on combined risk
-        if combined_risk >= 0.8:
-            risk_level = "CRITICAL"
-        elif combined_risk >= 0.5:
-            risk_level = "WARNING" 
-        elif combined_risk >= 0.2:
-            risk_level = "CAUTION"
-        else:
-            risk_level = "SAFE"
-        
-        # Risk breakdown for analysis
-        risk_breakdown = {
-            'ttc_risk': ttc_risk,
+        # **RETURN SEPARATED RISKS**
+        return combined_risk, {
+            # **SEPARATED COMPONENTS** - UnifiedRiskManager can use these independently
+            'ttc_risk': enhanced_ttc_risk,
             'signal_risk': signal_risk,
+            'raw_ttc_risk': ttc_risk,  # Before emergency vehicle boost
+            
+            # **THREAT OBJECTS**
+            'primary_threat': ttc_object,
+            'signal_info': signal_object,
+            
+            # **COMBINED RISK** - for backward compatibility
             'combined_risk': combined_risk,
-            'primary_threat': primary_threat,
-            'signal_threat': signal_object,
-            'risk_level': risk_level,
-            'weights': {
-                'ttc_weight': primary_weight,
-                'signal_weight': secondary_weight
-            }
+            'risk_level': self.get_risk_status(combined_risk),
+            
+            # **SEPARATION FLAGS** - helps UnifiedRiskManager know it can handle them separately
+            'separation_mode': True,
+            'has_ttc_threat': ttc_object is not None,
+            'has_signal_threat': signal_object is not None,
+            
+            # **ALERTING HINTS** - for conditional alerting logic
+            'ttc_alert_level': self.get_risk_status(enhanced_ttc_risk) if ttc_object else 'NONE',
+            'signal_alert_level': signal_object.get('alert_level', 'NONE') if signal_object else 'NONE'
         }
-        
-        print(f"=== EXTERNAL RISK (TTC + Signal) ===")
-        print(f"TTC Risk: {ttc_risk:.3f} (weight: {primary_weight})")
-        print(f"Signal Risk: {signal_risk:.3f} (weight: {secondary_weight})")
-        print(f"Combined Risk: {combined_risk:.3f}")
-        print(f"Risk Level: {risk_level}")
-        
-        if primary_threat:
-            threat_type = primary_threat.get('class_name', 'unknown')
-            emergency_flag = " (EMERGENCY)" if primary_threat.get('is_emergency', False) else ""
-            print(f"Primary Threat: {threat_type}{emergency_flag} at {primary_threat['distance']:.1f}m")
-            
-        if signal_object:
-            print(f"Signal Alert: {signal_object['signal_type']} at {signal_object['distance']:.1f}m")
-            print(f"Required Deceleration: {signal_object['required_deceleration']:.2f} m/s²")
-            
-        print("===================================")
-        
-        # Update plotter with both TTC and signal data
-        signal_data = None
-        if signal_object:
-            signal_data = {
-                'distance': signal_object['distance'],
-                'signal_type': signal_object['signal_type'],
-                'signal_risk': signal_object['signal_risk'],
-                'required_deceleration': signal_object['required_deceleration']
-            }
-        
-        # Update the TTC plotter with unified risk and signal data
-        if hasattr(self, 'ttc_plotter'):
-            # Update the last TTC data point with unified risk and signal data
-            if len(self.ttc_plotter.ttc_data) > 0:
-                # Remove the last entry added by calculate_ttc_risk_simplified
-                self.ttc_plotter.ttc_data[-1] = ttc_risk
-                self.ttc_plotter.unified_risks[-1] = combined_risk
-                
-                # Add signal data to the last entry
-                if signal_data:
-                    self.ttc_plotter.signal_distances[-1] = signal_data['distance']
-                    self.ttc_plotter.signal_types[-1] = signal_data['signal_type']
-                    self.ttc_plotter.signal_risks[-1] = signal_data['signal_risk']
-                    self.ttc_plotter.current_decelerations[-1] = signal_data['required_deceleration']
-        
-        return combined_risk, risk_breakdown
         
     def update_plotter_with_unified_risk(self, combined_risk, risk_breakdown):
         """
