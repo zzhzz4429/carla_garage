@@ -102,9 +102,6 @@ class SafetyEvaluator:
         max_signal_risk = 0.0
         closest_signal_info = None
         
-        # LiDAR sensor limitation: Traffic lights can only be detected within 20 meters
-        LIDAR_DETECTION_RANGE = 20.0  # meters
-        
         for i, bb in enumerate(bounding_boxes):
             # Only consider traffic lights (2) and stop signs (3)
             if bb[7] not in [2, 3]:
@@ -112,10 +109,6 @@ class SafetyEvaluator:
                 
             # Get distance to signal
             d_i = bb[0]  # x-coordinate is distance to signal
-            
-            # Apply LiDAR range limitation - skip signals beyond sensor range
-            if d_i > LIDAR_DETECTION_RANGE:
-                continue
             
             # Calculate required deceleration to stop at the signal
             # Clamp distance to avoid division by zero
@@ -135,8 +128,7 @@ class SafetyEvaluator:
                     'distance': d_i,
                     'required_deceleration': a_req,
                     'signal_risk': signal_risk,
-                    'position': (bb[0], bb[1]),
-                    'within_sensor_range': d_i <= LIDAR_DETECTION_RANGE  # Track if within range
+                    'position': (bb[0], bb[1])
                 }
                 
         return max_signal_risk, closest_signal_info
