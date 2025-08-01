@@ -1349,6 +1349,12 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
             # Use the actual signal alert level from the straightforward signal compliance
             signal_alert_level = signal_info.get('alert_level', 'SAFE')
             self.current_signal_status = signal_alert_level
+            
+            # **NEW: Handle VIOLATION alert level**
+            if signal_alert_level == 'VIOLATION':
+                print(f"🚨 SENSOR AGENT: Signal violation detected - {signal_info.get('signal_type', 'Unknown')}")
+                # Set maximum signal risk for violations
+                self.current_signal_risk = 1.0
         else:
             self.current_signal_status = "SAFE"
             

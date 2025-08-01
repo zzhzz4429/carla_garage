@@ -120,7 +120,44 @@ class SafetyEvaluator:
             # Get distance to signal (distance to STOP LINE, not the traffic light itself)
             d_to_stop_line = bb[0]  # x-coordinate is distance to stop line
             
-            # Skip if too close (already past or at stop line)
+            # **SIMPLE VIOLATION DETECTION**
+            # If distance < 0, vehicle has passed through stop line → VIOLATION
+            if d_to_stop_line < 0.0:
+                signal_type = "Red Light" if bb[7] == 2 else "Stop Sign"
+                
+                # This is a violation - vehicle ran through the signal
+                violation_info = {
+                    'index': i,
+                    'signal_type': signal_type,
+                    'distance_to_stop_line': d_to_stop_line,  # Negative = past stop line
+                    'required_deceleration': 0.0,  # Already past, no deceleration can help
+                    'signal_risk': 1.0,  # Maximum risk - violation occurred
+                    'alert_level': 'VIOLATION',
+                    'position': (bb[0], bb[1]),
+                    'violation_detected': True,  # Flag for logging
+                    'ego_speed_at_violation': ego_speed,
+                    
+                    # **THRESHOLD FLAGS** - all false since violation already occurred
+                    'is_cautious': False,
+                    'is_warning': False,
+                    'is_critical': False,
+                    'is_emergency': False,
+                    
+                    # **THRESHOLDS** - for reference
+                    'thresholds': {
+                        'cautious': CAUTIOUS_DECEL_THRESHOLD,
+                        'warning': WARNING_DECEL_THRESHOLD,
+                        'critical': CRITICAL_DECEL_THRESHOLD,
+                        'emergency': EMERGENCY_DECEL_THRESHOLD
+                    }
+                }
+                
+                print(f"🚨 SIGNAL VIOLATION: {signal_type} - Vehicle past stop line by {abs(d_to_stop_line):.1f}m at {ego_speed*3.6:.1f} km/h")
+                
+                # Return violation immediately with maximum risk
+                return 1.0, violation_info
+            
+            # Skip if too close but not violation (between 0 and 1m)
             if d_to_stop_line < 1.0:
                 continue
             

@@ -370,12 +370,29 @@ class SimpleTTCLogger:
         
         self.signal_events.append(signal_entry)
         
+        # **SIMPLE VIOLATION DETECTION**
+        # If safety evaluator detected a violation (alert_level = 'VIOLATION')
+        if alert_level == 'VIOLATION':
+            violation_entry = {
+                'timestamp': timestamp,
+                'relative_time': timestamp - self.start_time,
+                'signal_type': signal_type,
+                'distance_past_stop_line': abs(distance),  # How far past stop line
+                'ego_speed_at_violation': ego_speed,
+                'ego_speed_kmh_at_violation': ego_speed * 3.6,
+                'violation_type': 'RAN_SIGNAL'
+            }
+            
+            self.signal_violations.append(violation_entry)
+            print(f"📝 LOGGED VIOLATION: {signal_type} - {abs(distance):.1f}m past stop line at {ego_speed*3.6:.1f} km/h")
+        
         # Print significant signal events
-        if alert_level in ['CRITICAL', 'EMERGENCY']:
+        if alert_level in ['CRITICAL', 'EMERGENCY', 'VIOLATION']:
             print(f"🚦 SIGNAL {alert_level}: {signal_type} at {distance:.1f}m")
-            print(f"   Required: {required_decel:.1f} m/s², Max achieved: {self.max_deceleration:.1f} m/s²")
-            if signal_entry['deceleration_deficit'] > 0:
-                print(f"   ⚠️ Deficit: {signal_entry['deceleration_deficit']:.1f} m/s²")
+            if alert_level != 'VIOLATION':
+                print(f"   Required: {required_decel:.1f} m/s², Max achieved: {self.max_deceleration:.1f} m/s²")
+                if signal_entry['deceleration_deficit'] > 0:
+                    print(f"   ⚠️ Deficit: {signal_entry['deceleration_deficit']:.1f} m/s²")
         
     def get_alert_lead_time(self) -> Optional[float]:
         """
