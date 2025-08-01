@@ -134,6 +134,7 @@ class SafetyEvaluator:
                     'index': i,
                     'signal_type': signal_type,
                     'distance_to_stop_line': d_to_stop_line,  # Negative = past stop line
+                    'distance': d_to_stop_line,  # For backward compatibility with display
                     'required_deceleration': 0.0,  # Already past, no deceleration can help
                     'signal_risk': 1.0,  # Maximum risk - violation occurred
                     'alert_level': 'VIOLATION',
@@ -197,6 +198,7 @@ class SafetyEvaluator:
                     'index': i,
                     'signal_type': signal_type,
                     'distance_to_stop_line': d_to_stop_line,  # Clarified naming
+                    'distance': d_to_stop_line,  # For backward compatibility with display
                     'required_deceleration': required_deceleration,
                     'signal_risk': signal_risk,
                     'alert_level': alert_level,
