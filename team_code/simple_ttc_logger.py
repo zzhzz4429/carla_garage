@@ -379,7 +379,8 @@ class SimpleTTCLogger:
         # **SIMPLE VIOLATION DETECTION**
         # If safety evaluator detected a violation (alert_level = 'VIOLATION')
         if alert_level == 'VIOLATION':
-            print(f"🚨 LOGGING VIOLATION: {signal_type} at distance {distance:.2f}m")
+            print(f"🚨 SIMPLE_TTC_LOGGER: Processing VIOLATION for {signal_type}")
+            print(f"📊 Current violation count before: {len(self.signal_violations)}")
             
             violation_entry = {
                 'timestamp': timestamp,
@@ -392,8 +393,8 @@ class SimpleTTCLogger:
             }
             
             self.signal_violations.append(violation_entry)
-            print(f"📝 LOGGED VIOLATION: {signal_type} - {abs(distance):.1f}m past stop line at {ego_speed*3.6:.1f} km/h")
-            print(f"📊 TOTAL VIOLATIONS: {len(self.signal_violations)}")
+            print(f"📊 VIOLATION LOGGED: {signal_type} - {abs(distance):.1f}m past stop line at {ego_speed*3.6:.1f} km/h")
+            print(f"📊 Total violations after logging: {len(self.signal_violations)}")
         
         # Print significant signal events
         if alert_level in ['CRITICAL', 'EMERGENCY', 'VIOLATION']:

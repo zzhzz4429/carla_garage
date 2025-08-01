@@ -140,18 +140,27 @@ class SafetyEvaluator:
             signal_type = "Red Light" if bb[7] == 2 else "Stop Sign"
             
             # **TRACK SIGNAL for violation detection**
-            signal_id = f"{signal_type}_{bb[1]:.1f}"  # Use y-coordinate to distinguish signals
+            signal_id = f"{signal_type}_{bb[1]:.0f}"  # Use rounded y-coordinate for more stable ID
             current_frame_signals.add(signal_id)
             
-            # Update tracking data
-            self._tracked_signals[signal_id] = {
-                'distance': d_to_stop_line,
-                'signal_type': signal_type,
-                'last_seen_frame': self._frame_count,
-                'position': (bb[0], bb[1]),
-                'approaching': d_to_stop_line > 0 and d_to_stop_line < 50.0,  # Within 50m range
-                'ego_speed': ego_speed
-            }
+            # Check if this signal was already violated recently (prevent multiple violations)
+            recently_violated = False
+            if hasattr(self, '_recent_violations'):
+                recently_violated = signal_id in self._recent_violations
+            else:
+                self._recent_violations = set()
+            
+            # Update tracking data (only if not recently violated)
+            if not recently_violated:
+                self._tracked_signals[signal_id] = {
+                    'distance': d_to_stop_line,
+                    'signal_type': signal_type,
+                    'last_seen_frame': self._frame_count,
+                    'position': (bb[0], bb[1]),
+                    'approaching': d_to_stop_line > 0 and d_to_stop_line < 50.0,  # Within 50m range
+                    'ego_speed': ego_speed,
+                    'min_distance_seen': min(getattr(self._tracked_signals.get(signal_id, {}), 'min_distance_seen', float('inf')), d_to_stop_line)
+                }
             
             self._violation_debug_count += 1
             
@@ -277,9 +286,19 @@ class SafetyEvaluator:
                 if was_approaching and last_distance < 5.0 and last_distance > 0:
                     signal_type = signal_data['signal_type']
                     
+                    # **PREVENT MULTIPLE VIOLATIONS**: Check if this signal was already violated
+                    if signal_id in getattr(self, '_recent_violations', set()):
+                        continue  # Skip this signal, already violated
+                    
+                    # Add to recent violations to prevent duplicates
+                    if not hasattr(self, '_recent_violations'):
+                        self._recent_violations = set()
+                    self._recent_violations.add(signal_id)
+                    
                     # Log violation to debug file
                     if hasattr(self, '_debug_file') and self._debug_file:
-                        self._debug_file.write(f"DISAPPEARANCE VIOLATION: {signal_type} disappeared after approaching to {last_distance:.3f}m\n")
+                        min_distance = signal_data.get('min_distance_seen', last_distance)
+                        self._debug_file.write(f"SINGLE VIOLATION: {signal_type} disappeared after approaching to {min_distance:.3f}m (last: {last_distance:.3f}m)\n")
                         self._debug_file.flush()
                     
                     # Create violation info
