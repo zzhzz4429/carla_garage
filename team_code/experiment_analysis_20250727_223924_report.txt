@@ -1,0 +1,103 @@
+
+============================================================
+EXPERIMENT LOG ANALYSIS REPORT
+Generated: 2025-07-27 22:39:24
+============================================================
+
+=== DATASET OVERVIEW ===
+Total Trials Analyzed: 11
+Conditions Found: internal_only_P001, external_only_P001, fusion_P001
+Participants: T3
+
+
+=== INTERNAL ONLY P001 CONDITION ===
+Trials: 3
+
+Safety Performance:
+  Average Minimum Distance: 12.32m
+  Average Safety Margin: 10.32m
+  Average Safety Score: 0.67
+  Collision Rate: 33.3%
+  Safety Outcomes: {'safe': 2, 'collision': 1}
+
+Alert Performance:
+  Average First Alert Distance: infm
+  Average Total Alerts: 4.3
+  False Positive Rate: 0.3
+  Alert Timing: {'early_appropriate': 2, 'no_alerts': 1}
+  Alert Effectiveness: {'precautionary': 1, 'insufficient': 1, 'correctly_suppressed': 1}
+
+Risk Metrics:
+  Average Peak Risk: 0.799
+  Average Emergency Events: 11.0
+
+
+=== EXTERNAL ONLY P001 CONDITION ===
+Trials: 5
+
+Safety Performance:
+  Average Minimum Distance: 3.83m
+  Average Safety Margin: 1.83m
+  Average Safety Score: 0.73
+  Collision Rate: 20.0%
+  Safety Outcomes: {'safe': 3, 'collision': 1, 'near_miss': 1}
+
+Alert Performance:
+  Average First Alert Distance: infm
+  Average Total Alerts: 4.8
+  False Positive Rate: 0.0
+  Alert Timing: {'appropriate': 4, 'early_appropriate': 1}
+  Alert Effectiveness: {'moderately_effective': 3, 'insufficient': 1, 'indeterminate': 1}
+
+Risk Metrics:
+  Average Peak Risk: 1.000
+  Average Emergency Events: 13.0
+
+
+=== FUSION P001 CONDITION ===
+Trials: 3
+
+Safety Performance:
+  Average Minimum Distance: 13.24m
+  Average Safety Margin: 11.24m
+  Average Safety Score: 0.92
+  Collision Rate: 0.0%
+  Safety Outcomes: {'safe': 3}
+
+Alert Performance:
+  Average First Alert Distance: infm
+  Average Total Alerts: 3.7
+  False Positive Rate: 0.3
+  Alert Timing: {'early_appropriate': 2, 'no_alerts': 1}
+  Alert Effectiveness: {'indeterminate': 1, 'effective': 1, 'correctly_suppressed': 1}
+
+Risk Metrics:
+  Average Peak Risk: 0.788
+  Average Emergency Events: 6.0
+
+
+============================================================
+CROSS-CONDITION COMPARISON
+============================================================
+
+Safety Margin Ranking (Higher = Better):
+  1. Fusion P001: 11.24m
+  2. Internal Only P001: 10.32m
+  3. External Only P001: 1.83m
+
+Collision Rate Ranking (Lower = Better):
+  1. Fusion P001: 0.0%
+  2. External Only P001: 20.0%
+  3. Internal Only P001: 33.3%
+
+Alert Timing Quality (% Appropriate):
+  External Only P001: 80.0%
+  Internal Only P001: 0.0%
+  Fusion P001: 0.0%
+
+Alert Effectiveness Rate:
+  Fusion P001: 33.3%
+  Internal Only P001: 0.0%
+  External Only P001: 0.0%
+
+============================================================

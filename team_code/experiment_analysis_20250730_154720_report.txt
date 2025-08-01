@@ -1,0 +1,103 @@
+
+============================================================
+EXPERIMENT LOG ANALYSIS REPORT
+Generated: 2025-07-30 15:47:20
+============================================================
+
+=== DATASET OVERVIEW ===
+Total Trials Analyzed: 12
+Conditions Found: SC-EV_fusion_P001, SC-EV_external_only_P001, SC-EV_internal_only_P001
+Participants: T3
+
+
+=== SC-EV FUSION P001 CONDITION ===
+Trials: 4
+
+Safety Performance:
+  Average Minimum Distance: 14.34m
+  Average Safety Margin: 12.34m
+  Average Safety Score: 1.00
+  Collision Rate: 0.0%
+  Safety Outcomes: {'safe': 4}
+
+Alert Performance:
+  Average First Alert Distance: infm
+  Average Total Alerts: 2.2
+  False Positive Rate: 0.5
+  Alert Timing: {'early_appropriate': 2, 'no_alerts': 1, 'appropriate': 1}
+  Alert Effectiveness: {'indeterminate': 1, 'precautionary': 1, 'correctly_suppressed': 1, 'moderately_effective': 1}
+
+Risk Metrics:
+  Average Peak Risk: 0.787
+  Average Emergency Events: 5.5
+
+
+=== SC-EV EXTERNAL ONLY P001 CONDITION ===
+Trials: 4
+
+Safety Performance:
+  Average Minimum Distance: 6.13m
+  Average Safety Margin: 4.13m
+  Average Safety Score: 0.67
+  Collision Rate: 0.0%
+  Safety Outcomes: {'safe': 3, 'no_data': 1}
+
+Alert Performance:
+  Average First Alert Distance: 16.4m
+  Average Total Alerts: 2.0
+  False Positive Rate: 0.4
+  Alert Timing: {'appropriate': 3, 'no_alerts': 1}
+  Alert Effectiveness: {'indeterminate': 2, 'moderately_effective': 1, 'effective': 1}
+
+Risk Metrics:
+  Average Peak Risk: 0.750
+  Average Emergency Events: 9.5
+
+
+=== SC-EV INTERNAL ONLY P001 CONDITION ===
+Trials: 4
+
+Safety Performance:
+  Average Minimum Distance: 13.53m
+  Average Safety Margin: 11.53m
+  Average Safety Score: 0.75
+  Collision Rate: 25.0%
+  Safety Outcomes: {'safe': 3, 'collision': 1}
+
+Alert Performance:
+  Average First Alert Distance: infm
+  Average Total Alerts: 1.8
+  False Positive Rate: 0.5
+  Alert Timing: {'early_appropriate': 2, 'appropriate': 1, 'no_alerts': 1}
+  Alert Effectiveness: {'precautionary': 2, 'insufficient': 1, 'lucky_safe': 1}
+
+Risk Metrics:
+  Average Peak Risk: 0.656
+  Average Emergency Events: 8.5
+
+
+============================================================
+CROSS-CONDITION COMPARISON
+============================================================
+
+Safety Margin Ranking (Higher = Better):
+  1. Sc-Ev Fusion P001: 12.34m
+  2. Sc-Ev Internal Only P001: 11.53m
+  3. Sc-Ev External Only P001: 4.13m
+
+Collision Rate Ranking (Lower = Better):
+  1. Sc-Ev Fusion P001: 0.0%
+  2. Sc-Ev External Only P001: 0.0%
+  3. Sc-Ev Internal Only P001: 25.0%
+
+Alert Timing Quality (% Appropriate):
+  Sc-Ev External Only P001: 75.0%
+  Sc-Ev Fusion P001: 25.0%
+  Sc-Ev Internal Only P001: 25.0%
+
+Alert Effectiveness Rate:
+  Sc-Ev External Only P001: 25.0%
+  Sc-Ev Fusion P001: 0.0%
+  Sc-Ev Internal Only P001: 0.0%
+
+============================================================

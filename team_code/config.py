@@ -571,7 +571,7 @@ class GlobalConfig:
     self.longitudinal_max_acceleration = 1.89  # maximum acceleration 1.9 m/tick
 
     # Whether the model in and outputs will be visualized and saved into SAVE_PATH
-    self.debug = False
+    self.debug = True
 
     # -----------------------------------------------------------------------------
     # Logger

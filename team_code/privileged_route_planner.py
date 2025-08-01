@@ -9,6 +9,8 @@ import carla
 from scipy.interpolate import interp1d
 from scipy.spatial import cKDTree
 from agents.navigation.local_planner import RoadOption
+# Add this debug print at the start of your code
+
 
 
 class PrivilegedRoutePlanner(object):
@@ -738,7 +740,7 @@ class PrivilegedRoutePlanner(object):
     map_name = carla_map.name.split("/")[-1]
 
     # Load speed limit data from file
-    file_name_speed_limits = f"team_code/speed_limits/{map_name}_speed_limits.npy"
+    file_name_speed_limits = f"speed_limits/{map_name}_speed_limits.npy"
     file_content = np.load(file_name_speed_limits, allow_pickle=True)
     map_data = file_content.item()
 

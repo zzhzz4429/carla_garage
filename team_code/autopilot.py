@@ -26,6 +26,9 @@ from scenario_logger import ScenarioLogger
 from longitudinal_controller import LongitudinalLinearRegressionController
 from kinematic_bicycle_model import KinematicBicycleModel
 
+# Add this debug print at the start of your code
+print("Current working directory:", os.getcwd())
+print("Speed limits file exists:", os.path.exists("speed_limits/Town12_speed_limits.npy"))
 
 def get_entry_point():
   return "AutoPilot"
@@ -72,7 +75,7 @@ class AutoPilot(autonomous_agent_local.AutonomousAgent):
     self.vehicle_model = KinematicBicycleModel(self.config)
 
     # Configuration
-    self.visualize = int(os.environ.get("DEBUG_CHALLENGE", 0))
+    self.visualize = int(os.environ.get("DEBUG_CHALLENGE", 1))
 
     self.walker_close = False
     self.distance_to_walker = np.inf
@@ -1150,110 +1153,209 @@ class AutoPilot(autonomous_agent_local.AutonomousAgent):
 
     return False
 
+  # def predict_other_actors_bounding_boxes(self, plant, actor_list, ego_vehicle_location, num_future_frames,
+  #                                         near_lane_change):
+  #   """
+  #       Predict the future bounding boxes of actors for a given number of frames.
+
+  #       Args:
+  #           plant (bool): Whether to use PlanT.
+  #           actor_list (list): A list of actors (e.g., vehicles) in the simulation.
+  #           ego_vehicle_location (carla.Location): The current location of the ego vehicle.
+  #           num_future_frames (int): The number of future frames to predict.
+  #           near_lane_change (bool): Whether the ego vehicle is near a lane change maneuver.
+
+  #       Returns:
+  #           dict: A dictionary mapping actor IDs to lists of predicted bounding boxes for each future frame.
+  #       """
+  #   predicted_bounding_boxes = {}
+
+  #   if not plant:
+  #     # Filter out nearby actors within the detection radius, excluding the ego vehicle
+  #     nearby_actors = [
+  #         actor for actor in actor_list if actor.id != self._vehicle.id and
+  #         actor.get_location().distance(ego_vehicle_location) < self.config.detection_radius
+  #     ]
+
+  #     # If there are nearby actors, calculate their future bounding boxes
+  #     if nearby_actors:
+  #       # Get the previous control inputs (steering, throttle, brake) for the nearby actors
+  #       previous_controls = [actor.get_control() for actor in nearby_actors]
+  #       previous_actions = np.array([[control.steer, control.throttle, control.brake] for control in previous_controls])
+
+  #       # Get the current velocities, locations, and headings of the nearby actors
+  #       velocities = np.array([actor.get_velocity().length() for actor in nearby_actors])
+  #       locations = np.array([[actor.get_location().x,
+  #                              actor.get_location().y,
+  #                              actor.get_location().z] for actor in nearby_actors])
+  #       headings = np.deg2rad(np.array([actor.get_transform().rotation.yaw for actor in nearby_actors]))
+
+  #       # Initialize arrays to store future locations, headings, and velocities
+  #       future_locations = np.empty((num_future_frames, len(nearby_actors), 3), dtype="float")
+  #       future_headings = np.empty((num_future_frames, len(nearby_actors)), dtype="float")
+  #       future_velocities = np.empty((num_future_frames, len(nearby_actors)), dtype="float")
+
+  #       # Forecast the future locations, headings, and velocities for the nearby actors
+  #       for i in range(num_future_frames):
+  #         locations, headings, velocities = self.vehicle_model.forecast_other_vehicles(
+  #             locations, headings, velocities, previous_actions)
+  #         future_locations[i] = locations.copy()
+  #         future_velocities[i] = velocities.copy()
+  #         future_headings[i] = headings.copy()
+
+  #       # Convert future headings to degrees
+  #       future_headings = np.rad2deg(future_headings)
+
+  #       # Calculate the predicted bounding boxes for each nearby actor and future frame
+  #       for actor_idx, actor in enumerate(nearby_actors):
+  #         predicted_actor_boxes = []
+
+  #         for i in range(num_future_frames):
+  #           # Calculate the future location of the actor
+  #           location = carla.Location(x=future_locations[i, actor_idx, 0].item(),
+  #                                     y=future_locations[i, actor_idx, 1].item(),
+  #                                     z=future_locations[i, actor_idx, 2].item())
+
+  #           # Calculate the future rotation of the actor
+  #           rotation = carla.Rotation(pitch=0, yaw=future_headings[i, actor_idx], roll=0)
+
+  #           # Get the extent (dimensions) of the actor's bounding box
+  #           extent = actor.bounding_box.extent
+  #           # Otherwise we would increase the extent of the bounding box of the vehicle
+  #           extent = carla.Vector3D(x=extent.x, y=extent.y, z=extent.z)
+
+  #           # Adjust the bounding box size based on velocity and lane change maneuver to adjust for
+  #           # uncertainty during forecasting
+  #           s = self.config.high_speed_min_extent_x_other_vehicle_lane_change if near_lane_change \
+  #               else self.config.high_speed_min_extent_x_other_vehicle
+  #           extent.x *= self.config.slow_speed_extent_factor_ego if future_velocities[
+  #               i, actor_idx] < self.config.extent_other_vehicles_bbs_speed_threshold else max(
+  #                   s,
+  #                   self.config.high_speed_min_extent_x_other_vehicle * float(i) / float(num_future_frames))
+  #           extent.y *= self.config.slow_speed_extent_factor_ego if future_velocities[
+  #               i, actor_idx] < self.config.extent_other_vehicles_bbs_speed_threshold else max(
+  #                   self.config.high_speed_min_extent_y_other_vehicle,
+  #                   self.config.high_speed_extent_y_factor_other_vehicle * float(i) / float(num_future_frames))
+
+  #           # Create the bounding box for the future frame
+  #           bounding_box = carla.BoundingBox(location, extent)
+  #           bounding_box.rotation = rotation
+
+  #           # Append the bounding box to the list of predicted bounding boxes for this actor
+  #           predicted_actor_boxes.append(bounding_box)
+
+  #         # Store the predicted bounding boxes for this actor in the dictionary
+  #         predicted_bounding_boxes[actor.id] = predicted_actor_boxes
+
+  #       if self.visualize == 1:
+  #         for actor_idx, actors_forecasted_bounding_boxes in predicted_bounding_boxes.items():
+  #           for bb in actors_forecasted_bounding_boxes:
+  #             self._world.debug.draw_box(box=bb,
+  #                                        rotation=bb.rotation,
+  #                                        thickness=0.1,
+  #                                        color=self.config.other_vehicles_forecasted_bbs_color,
+  #                                        life_time=self.config.draw_life_time)
+
+  #   return predicted_bounding_boxes
+
   def predict_other_actors_bounding_boxes(self, plant, actor_list, ego_vehicle_location, num_future_frames,
-                                          near_lane_change):
+                                      near_lane_change):
     """
-        Predict the future bounding boxes of actors for a given number of frames.
+    Predict bounding boxes but visualize only the center points of actors.
 
-        Args:
-            plant (bool): Whether to use PlanT.
-            actor_list (list): A list of actors (e.g., vehicles) in the simulation.
-            ego_vehicle_location (carla.Location): The current location of the ego vehicle.
-            num_future_frames (int): The number of future frames to predict.
-            near_lane_change (bool): Whether the ego vehicle is near a lane change maneuver.
+    Args:
+        plant (bool): Whether to use PlanT.
+        actor_list (list): A list of actors in the simulation.
+        ego_vehicle_location (carla.Location): The current location of the ego vehicle.
+        num_future_frames (int): The number of future frames to predict.
+        near_lane_change (bool): Whether the ego vehicle is near a lane change maneuver.
 
-        Returns:
-            dict: A dictionary mapping actor IDs to lists of predicted bounding boxes for each future frame.
-        """
+    Returns:
+        dict: A dictionary mapping actor IDs to lists of predicted bounding boxes for each future frame.
+    """
     predicted_bounding_boxes = {}
 
     if not plant:
-      # Filter out nearby actors within the detection radius, excluding the ego vehicle
-      nearby_actors = [
-          actor for actor in actor_list if actor.id != self._vehicle.id and
-          actor.get_location().distance(ego_vehicle_location) < self.config.detection_radius
-      ]
+        # Filter out nearby actors within the detection radius, excluding the ego vehicle
+        nearby_actors = [
+            actor for actor in actor_list if actor.id != self._vehicle.id and
+            actor.get_location().distance(ego_vehicle_location) < self.config.detection_radius
+        ]
 
-      # If there are nearby actors, calculate their future bounding boxes
-      if nearby_actors:
-        # Get the previous control inputs (steering, throttle, brake) for the nearby actors
-        previous_controls = [actor.get_control() for actor in nearby_actors]
-        previous_actions = np.array([[control.steer, control.throttle, control.brake] for control in previous_controls])
+        # If there are nearby actors, calculate their future bounding boxes
+        if nearby_actors:
+            previous_controls = [actor.get_control() for actor in nearby_actors]
+            previous_actions = np.array([[control.steer, control.throttle, control.brake] for control in previous_controls])
 
-        # Get the current velocities, locations, and headings of the nearby actors
-        velocities = np.array([actor.get_velocity().length() for actor in nearby_actors])
-        locations = np.array([[actor.get_location().x,
-                               actor.get_location().y,
-                               actor.get_location().z] for actor in nearby_actors])
-        headings = np.deg2rad(np.array([actor.get_transform().rotation.yaw for actor in nearby_actors]))
+            velocities = np.array([actor.get_velocity().length() for actor in nearby_actors])
+            locations = np.array([[actor.get_location().x,
+                                 actor.get_location().y,
+                                 actor.get_location().z] for actor in nearby_actors])
+            headings = np.deg2rad(np.array([actor.get_transform().rotation.yaw for actor in nearby_actors]))
 
-        # Initialize arrays to store future locations, headings, and velocities
-        future_locations = np.empty((num_future_frames, len(nearby_actors), 3), dtype="float")
-        future_headings = np.empty((num_future_frames, len(nearby_actors)), dtype="float")
-        future_velocities = np.empty((num_future_frames, len(nearby_actors)), dtype="float")
+            future_locations = np.empty((num_future_frames, len(nearby_actors), 3), dtype="float")
+            future_headings = np.empty((num_future_frames, len(nearby_actors)), dtype="float")
+            future_velocities = np.empty((num_future_frames, len(nearby_actors)), dtype="float")
 
-        # Forecast the future locations, headings, and velocities for the nearby actors
-        for i in range(num_future_frames):
-          locations, headings, velocities = self.vehicle_model.forecast_other_vehicles(
-              locations, headings, velocities, previous_actions)
-          future_locations[i] = locations.copy()
-          future_velocities[i] = velocities.copy()
-          future_headings[i] = headings.copy()
+            for i in range(num_future_frames):
+                locations, headings, velocities = self.vehicle_model.forecast_other_vehicles(
+                    locations, headings, velocities, previous_actions)
+                future_locations[i] = locations.copy()
+                future_velocities[i] = velocities.copy()
+                future_headings[i] = headings.copy()
 
-        # Convert future headings to degrees
-        future_headings = np.rad2deg(future_headings)
+            future_headings = np.rad2deg(future_headings)
 
-        # Calculate the predicted bounding boxes for each nearby actor and future frame
-        for actor_idx, actor in enumerate(nearby_actors):
-          predicted_actor_boxes = []
+            # Calculate bounding boxes and draw points for each nearby actor
+            for actor_idx, actor in enumerate(nearby_actors):
+                predicted_actor_boxes = []
 
-          for i in range(num_future_frames):
-            # Calculate the future location of the actor
-            location = carla.Location(x=future_locations[i, actor_idx, 0].item(),
-                                      y=future_locations[i, actor_idx, 1].item(),
-                                      z=future_locations[i, actor_idx, 2].item())
+                for i in range(num_future_frames):
+                    location = carla.Location(x=future_locations[i, actor_idx, 0].item(),
+                                           y=future_locations[i, actor_idx, 1].item(),
+                                           z=future_locations[i, actor_idx, 2].item())
+                    rotation = carla.Rotation(pitch=0, yaw=future_headings[i, actor_idx], roll=0)
 
-            # Calculate the future rotation of the actor
-            rotation = carla.Rotation(pitch=0, yaw=future_headings[i, actor_idx], roll=0)
+                    # Calculate bounding box (kept for collision detection)
+                    extent = actor.bounding_box.extent
+                    extent = carla.Vector3D(x=extent.x, y=extent.y, z=extent.z)
 
-            # Get the extent (dimensions) of the actor's bounding box
-            extent = actor.bounding_box.extent
-            # Otherwise we would increase the extent of the bounding box of the vehicle
-            extent = carla.Vector3D(x=extent.x, y=extent.y, z=extent.z)
+                    s = self.config.high_speed_min_extent_x_other_vehicle_lane_change if near_lane_change \
+                        else self.config.high_speed_min_extent_x_other_vehicle
+                    extent.x *= self.config.slow_speed_extent_factor_ego if future_velocities[
+                        i, actor_idx] < self.config.extent_other_vehicles_bbs_speed_threshold else max(
+                            s,
+                            self.config.high_speed_min_extent_x_other_vehicle * float(i) / float(num_future_frames))
+                    extent.y *= self.config.slow_speed_extent_factor_ego if future_velocities[
+                        i, actor_idx] < self.config.extent_other_vehicles_bbs_speed_threshold else max(
+                            self.config.high_speed_min_extent_y_other_vehicle,
+                            self.config.high_speed_extent_y_factor_other_vehicle * float(i) / float(num_future_frames))
 
-            # Adjust the bounding box size based on velocity and lane change maneuver to adjust for
-            # uncertainty during forecasting
-            s = self.config.high_speed_min_extent_x_other_vehicle_lane_change if near_lane_change \
-                else self.config.high_speed_min_extent_x_other_vehicle
-            extent.x *= self.config.slow_speed_extent_factor_ego if future_velocities[
-                i, actor_idx] < self.config.extent_other_vehicles_bbs_speed_threshold else max(
-                    s,
-                    self.config.high_speed_min_extent_x_other_vehicle * float(i) / float(num_future_frames))
-            extent.y *= self.config.slow_speed_extent_factor_ego if future_velocities[
-                i, actor_idx] < self.config.extent_other_vehicles_bbs_speed_threshold else max(
-                    self.config.high_speed_min_extent_y_other_vehicle,
-                    self.config.high_speed_extent_y_factor_other_vehicle * float(i) / float(num_future_frames))
+                    bounding_box = carla.BoundingBox(location, extent)
+                    bounding_box.rotation = rotation
+                    predicted_actor_boxes.append(bounding_box)
 
-            # Create the bounding box for the future frame
-            bounding_box = carla.BoundingBox(location, extent)
-            bounding_box.rotation = rotation
+                    # Draw point with color gradient (red to blue)
+                    if self.visualize == 1:
+                        
+                        color = carla.Color(
+                            r=int(255 * (1 - i/num_future_frames)),
+                            g=0,
+                            b=int(255 * (i/num_future_frames))
+                        )
+                        self._world.debug.draw_point(
+                            location,
+                            size=0.1,
+                            color=color,
+                            life_time=0.1
+                        )
 
-            # Append the bounding box to the list of predicted bounding boxes for this actor
-            predicted_actor_boxes.append(bounding_box)
+                predicted_bounding_boxes[actor.id] = predicted_actor_boxes
 
-          # Store the predicted bounding boxes for this actor in the dictionary
-          predicted_bounding_boxes[actor.id] = predicted_actor_boxes
-
-        if self.visualize == 1:
-          for actor_idx, actors_forecasted_bounding_boxes in predicted_bounding_boxes.items():
-            for bb in actors_forecasted_bounding_boxes:
-              self._world.debug.draw_box(box=bb,
-                                         rotation=bb.rotation,
-                                         thickness=0.1,
-                                         color=self.config.other_vehicles_forecasted_bbs_color,
-                                         life_time=self.config.draw_life_time)
-
+    print("predicted_bounding_boxe")
     return predicted_bounding_boxes
+
+  
 
   def compute_target_speed_wrt_leading_vehicle(self, initial_target_speed, predicted_bounding_boxes, near_lane_change,
                                                ego_location, rear_vehicle_ids, leading_vehicle_ids,
@@ -1484,6 +1586,10 @@ class AutoPilot(autonomous_agent_local.AutonomousAgent):
                                  thickness=0.1,
                                  color=self.config.ego_vehicle_bb_color,
                                  life_time=self.config.draw_life_time)
+      # self._world.debug.draw_point(ego_vehicle_location,
+      #                              size=0.1,
+      #                              color=self.config.ego_vehicle_bb_color,
+      #                              life_time=self.config.draw_life_time)
 
     # Reset hazard flags
     self.stop_sign_close = False
