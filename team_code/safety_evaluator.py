@@ -119,11 +119,15 @@ class SafetyEvaluator:
                 
             # Get distance to signal (distance to STOP LINE, not the traffic light itself)
             d_to_stop_line = bb[0]  # x-coordinate is distance to stop line
+            signal_type = "Red Light" if bb[7] == 2 else "Stop Sign"
+            
+            # **DEBUG: Print all signal detections**
+            print(f"🔍 SIGNAL DEBUG: {signal_type} at distance {d_to_stop_line:.2f}m")
             
             # **SIMPLE VIOLATION DETECTION**
             # If distance < 0, vehicle has passed through stop line → VIOLATION
             if d_to_stop_line < 0.0:
-                signal_type = "Red Light" if bb[7] == 2 else "Stop Sign"
+                print(f"🚨 VIOLATION DETECTED IN SAFETY_EVALUATOR: {signal_type} at {d_to_stop_line:.2f}m")
                 
                 # This is a violation - vehicle ran through the signal
                 violation_info = {
@@ -159,6 +163,7 @@ class SafetyEvaluator:
             
             # Skip if too close but not violation (between 0 and 1m)
             if d_to_stop_line < 1.0:
+                print(f"🔍 SIGNAL DEBUG: Skipping {signal_type} too close but not violation ({d_to_stop_line:.2f}m)")
                 continue
             
             # Calculate required deceleration to stop at the stop line
@@ -273,10 +278,14 @@ class SafetyEvaluator:
         return center_to_center_distance <= collision_threshold
         
     def finalize_plots(self):
-        """
-        Create and save all TTC plots and data
-        """
-        self.ttc_plotter.finalize_session()
+        """Finalize and save TTC plots with error handling"""
+        try:
+            if hasattr(self, 'ttc_plotter'):
+                self.ttc_plotter.finalize_session()
+        except Exception as e:
+            print(f"⚠️ Error during plot finalization: {e}")
+            print("🔍 This is likely a matplotlib/logging configuration issue - continuing without plots")
+            # Don't crash the shutdown process due to plotting errors
         
 
         

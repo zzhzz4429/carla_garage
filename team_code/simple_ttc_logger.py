@@ -318,6 +318,12 @@ class SimpleTTCLogger:
         if not signal_info:
             return
         
+        # **DEBUG: Print all signal logging calls**
+        signal_type = signal_info.get('signal_type', 'Unknown')
+        alert_level = signal_info.get('alert_level', 'SAFE')
+        distance = signal_info.get('distance_to_stop_line', 0.0)
+        print(f"🔍 LOGGER DEBUG: Logging {signal_type} with alert_level='{alert_level}' at distance={distance:.2f}m")
+        
         # Update signal encounter metrics
         self.signal_metrics['total_signals_encountered'] += 1
         
@@ -373,6 +379,8 @@ class SimpleTTCLogger:
         # **SIMPLE VIOLATION DETECTION**
         # If safety evaluator detected a violation (alert_level = 'VIOLATION')
         if alert_level == 'VIOLATION':
+            print(f"🚨 LOGGER DEBUG: Processing VIOLATION for {signal_type}")
+            
             violation_entry = {
                 'timestamp': timestamp,
                 'relative_time': timestamp - self.start_time,
@@ -385,6 +393,9 @@ class SimpleTTCLogger:
             
             self.signal_violations.append(violation_entry)
             print(f"📝 LOGGED VIOLATION: {signal_type} - {abs(distance):.1f}m past stop line at {ego_speed*3.6:.1f} km/h")
+            print(f"📊 TOTAL VIOLATIONS NOW: {len(self.signal_violations)}")
+        else:
+            print(f"🔍 LOGGER DEBUG: Not a violation - alert_level is '{alert_level}'")
         
         # Print significant signal events
         if alert_level in ['CRITICAL', 'EMERGENCY', 'VIOLATION']:
