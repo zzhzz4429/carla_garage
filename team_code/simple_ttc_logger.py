@@ -39,6 +39,11 @@ class SimpleTTCLogger:
         self.max_deceleration = 0.0       # Maximum deceleration experienced
         self.deceleration_events = []     # All significant deceleration events
         
+        # **NEW: Signal violation tracking**
+        self.active_signals = {}          # Track ongoing signal encounters {signal_id: signal_data}
+        self.signal_violations = []       # Actual violations (running red lights/stop signs)
+        self.violation_warnings = []      # Violation warnings/near misses
+        
         # **NEW: Signal violation metrics**
         self.signal_metrics = {
             'total_signals_encountered': 0,
@@ -49,7 +54,9 @@ class SimpleTTCLogger:
             'max_required_deceleration': 0.0,
             'avg_signal_distance': 0.0,
             'red_light_encounters': 0,
-            'stop_sign_encounters': 0
+            'stop_sign_encounters': 0,
+            'actual_violations': 0,       # Count of confirmed violations
+            'near_violations': 0          # Count of near violations
         }
         
         # Experiment tracking
@@ -370,12 +377,116 @@ class SimpleTTCLogger:
         
         self.signal_events.append(signal_entry)
         
+        # **NEW: VIOLATION DETECTION LOGIC** 
+        # Detect actual signal violations (running red lights/stop signs)
+        signal_id = f"{signal_type}_{distance:.1f}"  # Unique identifier for this signal
+        
+        # Check if this is a new signal encounter or ongoing tracking
+        if signal_id not in getattr(self, 'active_signals', {}):
+            # Initialize active signals tracking if it doesn't exist
+            if not hasattr(self, 'active_signals'):
+                self.active_signals = {}
+            
+            # New signal encounter - start tracking
+            self.active_signals[signal_id] = {
+                'first_detected': timestamp,
+                'initial_distance': distance,
+                'signal_type': signal_type,
+                'alert_level': alert_level,
+                'required_deceleration': required_decel,
+                'ego_speed_at_detection': ego_speed,
+                'min_distance_achieved': distance,
+                'stopped': False,
+                'violated': False
+            }
+            print(f"🎯 Started tracking {signal_type} at {distance:.1f}m")
+        
+        else:
+            # Ongoing signal tracking - update status
+            signal_data = self.active_signals[signal_id]
+            signal_data['min_distance_achieved'] = min(signal_data['min_distance_achieved'], distance)
+            
+            # **VIOLATION DETECTION**
+            if distance <= 0.0:  # Vehicle passed through stop line
+                if not signal_data['violated'] and not signal_data['stopped']:
+                    # Vehicle ran through the signal without stopping
+                    violation_entry = {
+                        'timestamp': timestamp,
+                        'relative_time': timestamp - self.start_time,
+                        'signal_type': signal_type,
+                        'violation_type': 'RAN_SIGNAL',
+                        'initial_distance': signal_data['initial_distance'],
+                        'final_distance': distance,
+                        'required_deceleration': signal_data['required_deceleration'],
+                        'alert_level': signal_data['alert_level'],
+                        'ego_speed_at_detection': signal_data['ego_speed_at_detection'],
+                        'ego_speed_at_violation': ego_speed,
+                        'time_duration': timestamp - signal_data['first_detected'],
+                        'severity': self._classify_violation_severity(signal_data['alert_level'])
+                    }
+                    
+                    self.signal_violations.append(violation_entry)
+                    self.signal_metrics['actual_violations'] += 1
+                    signal_data['violated'] = True
+                    
+                    print(f"🚨 SIGNAL VIOLATION DETECTED!")
+                    print(f"   Type: {signal_type}")
+                    print(f"   Initial distance: {signal_data['initial_distance']:.1f}m")
+                    print(f"   Required deceleration: {signal_data['required_deceleration']:.1f} m/s²")
+                    print(f"   Speed at violation: {ego_speed*3.6:.1f} km/h")
+                    
+            elif ego_speed < 0.5 and distance > 0.0:  # Vehicle stopped before stop line
+                if not signal_data['stopped']:
+                    signal_data['stopped'] = True
+                    print(f"✅ Vehicle stopped safely at {distance:.1f}m from {signal_type}")
+        
+        # **NEAR VIOLATION DETECTION**
+        # Detect near violations (high risk situations that didn't result in actual violations)
+        if (alert_level in ['CRITICAL', 'EMERGENCY'] and 
+            signal_entry['deceleration_deficit'] > 2.0 and
+            distance > 0.0):  # Still approaching but high risk
+            
+            near_violation_entry = {
+                'timestamp': timestamp,
+                'signal_type': signal_type,
+                'distance_to_stop_line': distance,
+                'required_deceleration': required_decel,
+                'deceleration_deficit': signal_entry['deceleration_deficit'],
+                'alert_level': alert_level,
+                'ego_speed': ego_speed
+            }
+            
+            # Avoid duplicate near violation entries for same signal
+            if not any(nv['timestamp'] == timestamp for nv in self.violation_warnings):
+                self.violation_warnings.append(near_violation_entry)
+                self.signal_metrics['near_violations'] += 1
+                print(f"⚠️ NEAR VIOLATION: {signal_type} - deficit {signal_entry['deceleration_deficit']:.1f} m/s²")
+        
         # Print significant signal events
         if alert_level in ['CRITICAL', 'EMERGENCY']:
             print(f"🚦 SIGNAL {alert_level}: {signal_type} at {distance:.1f}m")
             print(f"   Required: {required_decel:.1f} m/s², Max achieved: {self.max_deceleration:.1f} m/s²")
             if signal_entry['deceleration_deficit'] > 0:
                 print(f"   ⚠️ Deficit: {signal_entry['deceleration_deficit']:.1f} m/s²")
+    
+    def _classify_violation_severity(self, alert_level: str) -> str:
+        """
+        **NEW: Classify violation severity based on alert level**
+        
+        Args:
+            alert_level: The alert level when violation occurred
+            
+        Returns:
+            str: Severity classification
+        """
+        severity_mapping = {
+            'EMERGENCY': 'SEVERE',
+            'CRITICAL': 'HIGH', 
+            'WARNING': 'MEDIUM',
+            'CAUTIOUS': 'LOW',
+            'SAFE': 'MINIMAL'
+        }
+        return severity_mapping.get(alert_level, 'UNKNOWN')
         
     def get_alert_lead_time(self) -> Optional[float]:
         """
@@ -1033,26 +1144,27 @@ Violations by Signal Type:"""
 
     def get_signal_violation_summary(self) -> Dict:
         """
-        Generate summary statistics for signal compliance violations
+        **UPDATED: Generate summary statistics for signal compliance violations**
         
         Returns:
-            Dictionary with violation statistics
+            Dictionary with comprehensive violation statistics
         """
-        if not self.signal_events:
+        if not self.signal_violations:
             return {
-                'total_events': 0,
                 'violations': 0,
                 'violation_rate': 0.0,
                 'by_signal_type': {},
                 'by_severity': {},
                 'max_deceleration_required': 0.0,
-                'average_violation_distance': 0.0
+                'average_violation_distance': 0.0,
+                'near_violations': len(getattr(self, 'violation_warnings', [])),
+                'total_risk_events': len(getattr(self, 'violation_warnings', []))
             }
         
         # Count violations by type and severity
         violations_by_type = {}
         violations_by_severity = {}
-        max_decel = 0.0
+        max_decel_required = 0.0
         violation_distances = []
         
         for violation in self.signal_violations:
@@ -1064,26 +1176,30 @@ Violations by Signal Type:"""
             severity = violation.get('severity', 'Unknown')
             violations_by_severity[severity] = violations_by_severity.get(severity, 0) + 1
             
-            # Track max deceleration and distances
+            # Track maximum deceleration required
             decel = violation.get('required_deceleration', 0.0)
-            max_decel = max(max_decel, decel)
-            violation_distances.append(violation.get('distance', 0.0))
+            max_decel_required = max(max_decel_required, decel)
+            
+            # Track violation distances
+            violation_distances.append(violation.get('initial_distance', 0.0))
         
         # Calculate violation rate
         total_violations = len(self.signal_violations)
-        violation_rate = total_violations / len(self.signal_events) if self.signal_events else 0.0
+        total_signals = len(self.signal_events) if hasattr(self, 'signal_events') else 0
+        violation_rate = total_violations / total_signals if total_signals > 0 else 0.0
         
         # Average violation distance
         avg_violation_distance = sum(violation_distances) / len(violation_distances) if violation_distances else 0.0
         
         return {
-            'total_events': len(self.signal_events),
             'violations': total_violations,
             'violation_rate': violation_rate,
             'by_signal_type': violations_by_type,
             'by_severity': violations_by_severity,
-            'max_deceleration_required': max_decel,
-            'average_violation_distance': avg_violation_distance
+            'max_deceleration_required': max_decel_required,
+            'average_violation_distance': avg_violation_distance,
+            'near_violations': len(getattr(self, 'violation_warnings', [])),
+            'total_risk_events': total_violations + len(getattr(self, 'violation_warnings', []))
         } 
 
     def get_signal_compliance_metrics(self) -> Dict:
