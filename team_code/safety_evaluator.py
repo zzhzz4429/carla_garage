@@ -121,13 +121,40 @@ class SafetyEvaluator:
             d_to_stop_line = bb[0]  # x-coordinate is distance to stop line
             signal_type = "Red Light" if bb[7] == 2 else "Stop Sign"
             
-            # **DEBUG: Print all signal detections**
-            print(f"🔍 SIGNAL DEBUG: {signal_type} at distance {d_to_stop_line:.2f}m")
+            # **DEBUG: Log distance values to file for analysis**
+            if not hasattr(self, '_violation_debug_count'):
+                self._violation_debug_count = 0
+                self._debug_file = None
+            
+            self._violation_debug_count += 1
+            
+            # Create debug file on first signal detection
+            if self._debug_file is None:
+                import os
+                debug_dir = "/home/ascc304/carla_garage/debug_logs"
+                os.makedirs(debug_dir, exist_ok=True)
+                self._debug_file = open(f"{debug_dir}/violation_debug.txt", "w")
+                self._debug_file.write("=== VIOLATION DETECTION DEBUG LOG ===\n")
+                self._debug_file.write("Format: frame_count, signal_type, distance, status\n\n")
+            
+            # Log every signal detection to file
+            status = ""
+            if d_to_stop_line < 0.0:
+                status = "VIOLATION_DETECTED"
+            elif d_to_stop_line < 1.0:
+                status = "CLOSE_TO_SIGNAL"
+            else:
+                status = "NORMAL"
+            
+            self._debug_file.write(f"{self._violation_debug_count}, {signal_type}, {d_to_stop_line:.3f}, {status}\n")
+            self._debug_file.flush()  # Ensure immediate write
             
             # **SIMPLE VIOLATION DETECTION**
             # If distance < 0, vehicle has passed through stop line → VIOLATION
             if d_to_stop_line < 0.0:
-                print(f"🚨 VIOLATION DETECTED IN SAFETY_EVALUATOR: {signal_type} at {d_to_stop_line:.2f}m")
+                # Log violation trigger to file
+                self._debug_file.write(f"VIOLATION TRIGGERED: {signal_type} at {d_to_stop_line:.3f}m\n")
+                self._debug_file.flush()
                 
                 # This is a violation - vehicle ran through the signal
                 violation_info = {
@@ -157,14 +184,15 @@ class SafetyEvaluator:
                     }
                 }
                 
-                print(f"🚨 SIGNAL VIOLATION: {signal_type} - Vehicle past stop line by {abs(d_to_stop_line):.1f}m at {ego_speed*3.6:.1f} km/h")
+                # Log violation info to file
+                self._debug_file.write(f"RETURNING VIOLATION: {violation_info}\n")
+                self._debug_file.flush()
                 
                 # Return violation immediately with maximum risk
                 return 1.0, violation_info
             
             # Skip if too close but not violation (between 0 and 1m)
             if d_to_stop_line < 1.0:
-                print(f"🔍 SIGNAL DEBUG: Skipping {signal_type} too close but not violation ({d_to_stop_line:.2f}m)")
                 continue
             
             # Calculate required deceleration to stop at the stop line
@@ -288,6 +316,12 @@ class SafetyEvaluator:
             print(f"⚠️ Error during plot finalization: {e}")
             print("🔍 This is likely a matplotlib/logging configuration issue - continuing without plots")
             # Don't crash the shutdown process due to plotting errors
+        
+        # **Close debug file if open**
+        if hasattr(self, '_debug_file') and self._debug_file is not None:
+            self._debug_file.write("\n=== DEBUG SESSION COMPLETE ===\n")
+            self._debug_file.close()
+            print("📝 Violation debug log saved to: /home/ascc304/carla_garage/debug_logs/violation_debug.txt")
         
 
         
