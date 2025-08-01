@@ -30,15 +30,33 @@ class SimpleTTCLogger:
         
         # Data storage
         self.ttc_data = []
-        self.alert_events = []  # NEW: Track alert events for timing analysis
-        self.signal_violations = []  # NEW: Track signal compliance violations
+        self.alert_events = []  # Track alert events for timing analysis
+        self.signal_violations = []  # Track signal compliance violations
+        
+        # **NEW: Signal compliance and deceleration tracking**
+        self.signal_events = []           # All signal encounters
+        self.speed_history = []           # Track speed for deceleration calculation
+        self.max_deceleration = 0.0       # Maximum deceleration experienced
+        self.deceleration_events = []     # All significant deceleration events
+        
+        # **NEW: Signal violation metrics**
+        self.signal_metrics = {
+            'total_signals_encountered': 0,
+            'cautious_alerts': 0,         # 4.0+ m/s² required
+            'warning_alerts': 0,          # 6.0+ m/s² required
+            'critical_alerts': 0,         # 8.0+ m/s² required 
+            'emergency_alerts': 0,        # 10.0+ m/s² required
+            'max_required_deceleration': 0.0,
+            'avg_signal_distance': 0.0,
+            'red_light_encounters': 0,
+            'stop_sign_encounters': 0
+        }
         
         # Experiment tracking
         self.hazard_first_detected = None  # NEW: When police car first detected
         self.first_alert_issued = None     # NEW: When first alert was issued
         
         # Signal compliance tracking
-        self.signal_events = []  # Track all signal encounters
         self.violation_warnings = []  # Track violation warnings
         
         # Session info
@@ -68,6 +86,9 @@ class SimpleTTCLogger:
             driver_state: Current driver state (for internal-only experiments)
         """
         relative_time = timestamp - self.start_time
+        
+        # **NEW: Track speed and calculate deceleration**
+        self._track_speed_and_deceleration(timestamp, ego_speed)
         
         # Debug: Count all calls
         if not hasattr(self, '_call_count'):
@@ -99,38 +120,140 @@ class SimpleTTCLogger:
                 log_reason = f"Valid TTC: {ttc_value:.2f}s"
             elif distance > 0 and ttc_risk > 0:
                 should_log = True
-                log_reason = f"Risk present: {ttc_risk:.3f}"
+                log_reason = f"Distance: {distance:.1f}m, Risk: {ttc_risk:.3f}"
+            elif is_emergency and distance > 0:
+                should_log = True
+                log_reason = f"Emergency vehicle: {distance:.1f}m"
             elif distance > 0:
                 should_log = True
                 log_reason = f"Object detected: {distance:.1f}m"
-                
+            
             if should_log:
-                ttc_entry = {
+                data_entry = {
                     'timestamp': timestamp,
                     'relative_time': relative_time,
-                    'ttc': ttc_value if ttc_value != float('inf') else None,
                     'distance': distance,
-                    'ego_speed': ego_speed,
+                    'ttc': ttc_value if ttc_value != float('inf') else None,
+                    'ttc_risk': ttc_risk,
                     'object_type': object_type,
                     'is_emergency': is_emergency,
-                    'ttc_risk': ttc_risk,
+                    'ego_speed': ego_speed,
+                    'ego_speed_kmh': ego_speed * 3.6,
                     'internal_risk': internal_risk,
                     'driver_state': driver_state,
-                    'log_reason': log_reason
+                    'log_reason': log_reason,
+                    'max_deceleration_so_far': self.max_deceleration  # **NEW: Current max decel**
                 }
                 
-                self.ttc_data.append(ttc_entry)
+                self.ttc_data.append(data_entry)
                 
-                if len(self.ttc_data) % 10 == 1:  # Print every 10th entry
-                    print(f"TTC logged #{len(self.ttc_data)}: {log_reason} - {object_type} at {distance:.1f}m")
-            elif self._call_count % 50 == 0:
-                print(f"🔍 TTC rejected: ttc={ttc_value}, distance={distance}, risk={ttc_risk}")
-        elif self._call_count % 50 == 0:
-            print(f"🔍 No TTC object provided")
+                # Debug output for valid logs
+                if self._call_count % 25 == 0:  # Less frequent debug
+                    print(f"📝 Logged TTC data: {log_reason}")
+        
+        # **ALWAYS log basic frame data even without TTC object**
+        else:
+            # Still track basic info even when no TTC object present
+            basic_entry = {
+                'timestamp': timestamp,
+                'relative_time': relative_time,
+                'distance': None,
+                'ttc': None,
+                'ttc_risk': 0.0,
+                'object_type': 'none',
+                'is_emergency': False,
+                'ego_speed': ego_speed,
+                'ego_speed_kmh': ego_speed * 3.6,
+                'internal_risk': internal_risk,
+                'driver_state': driver_state,
+                'log_reason': 'no_ttc_object',
+                'max_deceleration_so_far': self.max_deceleration  # **NEW: Current max decel**
+            }
             
-        # Note: With new approach, TTC is always calculated for measurement
-        # No need for special internal-only logging since ttc_object will always exist
+            # Log every 5th frame when no objects present to reduce log size
+            if len(self.ttc_data) == 0 or self._call_count % 5 == 0:
+                self.ttc_data.append(basic_entry)
+    
+    def _track_speed_and_deceleration(self, timestamp: float, ego_speed: float):
+        """
+        **NEW: Track speed history and calculate maximum deceleration**
+        
+        Args:
+            timestamp: Current timestamp
+            ego_speed: Current ego vehicle speed (m/s)
+        """
+        # Add current speed to history
+        speed_entry = {
+            'timestamp': timestamp,
+            'speed': ego_speed,
+            'speed_kmh': ego_speed * 3.6
+        }
+        self.speed_history.append(speed_entry)
+        
+        # Calculate deceleration if we have at least 2 speed measurements
+        if len(self.speed_history) >= 2:
+            prev_entry = self.speed_history[-2]
+            current_entry = self.speed_history[-1]
             
+            dt = current_entry['timestamp'] - prev_entry['timestamp']
+            if dt > 0.01:  # Avoid division by very small time differences
+                dv = current_entry['speed'] - prev_entry['speed']
+                acceleration = dv / dt  # m/s²
+                
+                # Track deceleration (negative acceleration)
+                if acceleration < 0:
+                    deceleration = abs(acceleration)
+                    
+                    # Update maximum deceleration
+                    if deceleration > self.max_deceleration:
+                        self.max_deceleration = deceleration
+                        print(f"🛑 NEW MAX DECELERATION: {deceleration:.2f} m/s² at {ego_speed*3.6:.1f} km/h")
+                    
+                    # Log significant deceleration events (> 2 m/s²)
+                    if deceleration > 2.0:
+                        decel_event = {
+                            'timestamp': timestamp,
+                            'relative_time': timestamp - self.start_time,
+                            'deceleration': deceleration,
+                            'initial_speed': prev_entry['speed'],
+                            'final_speed': current_entry['speed'],
+                            'duration': dt,
+                            'speed_change_kmh': dv * 3.6,
+                            'severity': self._classify_deceleration(deceleration)
+                        }
+                        self.deceleration_events.append(decel_event)
+                        
+                        # Print significant deceleration events
+                        if deceleration > 5.0:  # Hard braking
+                            print(f"🚨 HARD BRAKING: {deceleration:.2f} m/s² at {ego_speed*3.6:.1f} km/h")
+        
+        # Keep only recent speed history to manage memory (last 100 seconds at 10Hz)
+        if len(self.speed_history) > 1000:
+            self.speed_history = self.speed_history[-500:]  # Keep last 50 seconds
+    
+    def _classify_deceleration(self, deceleration: float) -> str:
+        """
+        **NEW: Classify deceleration severity**
+        
+        Args:
+            deceleration: Deceleration value in m/s²
+            
+        Returns:
+            str: Severity classification matching signal compliance thresholds
+        """
+        if deceleration >= 10.0:
+            return "EMERGENCY"       # Emergency braking (matches signal emergency threshold)
+        elif deceleration >= 8.0:
+            return "CRITICAL"        # Critical braking (matches signal critical threshold)  
+        elif deceleration >= 6.0:
+            return "WARNING"         # Warning level braking (matches signal warning threshold)
+        elif deceleration >= 4.0:
+            return "CAUTIOUS"        # Cautious braking (matches signal cautious threshold)
+        elif deceleration >= 2.0:
+            return "MODERATE"        # Moderate braking
+        else:
+            return "LIGHT"           # Light braking
+    
     def log_alert_event(self, timestamp: float, alert_level: str, alert_type: str, 
                        current_ttc: Optional[float], current_distance: float, 
                        driver_state: str = "unknown"):
@@ -185,7 +308,7 @@ class SimpleTTCLogger:
             
     def log_signal_event(self, timestamp: float, signal_info: Dict, ego_speed: float):
         """
-        Log signal compliance events and violations
+        **NEW: Log signal compliance events with comprehensive metrics tracking**
         
         Args:
             timestamp: Current timestamp
@@ -194,54 +317,65 @@ class SimpleTTCLogger:
         """
         if not signal_info:
             return
-            
+        
+        # Update signal encounter metrics
+        self.signal_metrics['total_signals_encountered'] += 1
+        
+        signal_type = signal_info.get('signal_type', 'Unknown')
+        if 'Red Light' in signal_type:
+            self.signal_metrics['red_light_encounters'] += 1
+        elif 'Stop Sign' in signal_type:
+            self.signal_metrics['stop_sign_encounters'] += 1
+        
+        # Track alert levels based on deceleration thresholds
+        required_decel = signal_info.get('required_deceleration', 0.0)
+        alert_level = signal_info.get('alert_level', 'SAFE')
+        
+        if alert_level == 'EMERGENCY':
+            self.signal_metrics['emergency_alerts'] += 1
+        elif alert_level == 'CRITICAL':
+            self.signal_metrics['critical_alerts'] += 1
+        elif alert_level == 'WARNING':
+            self.signal_metrics['warning_alerts'] += 1
+        elif alert_level == 'CAUTIOUS':
+            self.signal_metrics['cautious_alerts'] += 1
+        
+        # Update maximum required deceleration
+        if required_decel > self.signal_metrics['max_required_deceleration']:
+            self.signal_metrics['max_required_deceleration'] = required_decel
+        
+        # Update average signal distance
+        distance = signal_info.get('distance_to_stop_line', 0.0)
+        total_signals = self.signal_metrics['total_signals_encountered']
+        current_avg = self.signal_metrics['avg_signal_distance']
+        self.signal_metrics['avg_signal_distance'] = (
+            (current_avg * (total_signals - 1) + distance) / total_signals
+        )
+        
+        # Log detailed signal event
         signal_entry = {
             'timestamp': timestamp,
             'relative_time': timestamp - self.start_time,
-            'signal_type': signal_info.get('signal_type', 'Unknown'),
-            'distance': signal_info.get('distance', 0.0),
-            'required_deceleration': signal_info.get('required_deceleration', 0.0),
+            'signal_type': signal_type,
+            'distance_to_stop_line': distance,
+            'required_deceleration': required_decel,
+            'alert_level': alert_level,
             'signal_risk': signal_info.get('signal_risk', 0.0),
-            'risk_category': signal_info.get('risk_category', 'UNKNOWN'),
-            'violation_imminent': signal_info.get('violation_imminent', False),
-            'violation_likely': signal_info.get('violation_likely', False),
             'ego_speed': ego_speed,
-            'ego_speed_kmh': ego_speed * 3.6
+            'ego_speed_kmh': ego_speed * 3.6,
+            'max_deceleration_at_time': self.max_deceleration,
+            'deceleration_deficit': max(0, required_decel - self.max_deceleration),  # How much more decel needed
+            'can_stop_safely': required_decel <= self.max_deceleration if self.max_deceleration > 0 else False
         }
         
         self.signal_events.append(signal_entry)
         
-        # Log violations separately for analysis
-        if signal_info.get('violation_imminent', False):
-            violation_entry = {
-                'timestamp': timestamp,
-                'relative_time': timestamp - self.start_time,
-                'violation_type': 'IMMINENT',
-                'signal_type': signal_info.get('signal_type', 'Unknown'),
-                'distance': signal_info.get('distance', 0.0),
-                'required_deceleration': signal_info.get('required_deceleration', 0.0),
-                'ego_speed_kmh': ego_speed * 3.6,
-                'severity': 'CRITICAL'
-            }
-            self.signal_violations.append(violation_entry)
-            print(f"🚨 SIGNAL VIOLATION (IMMINENT): {signal_info.get('signal_type')} at {signal_info.get('distance', 0):.1f}m")
-            print(f"   Required deceleration: {signal_info.get('required_deceleration', 0):.1f} m/s²")
-            
-        elif signal_info.get('violation_likely', False):
-            violation_entry = {
-                'timestamp': timestamp,
-                'relative_time': timestamp - self.start_time,
-                'violation_type': 'LIKELY',
-                'signal_type': signal_info.get('signal_type', 'Unknown'),
-                'distance': signal_info.get('distance', 0.0),
-                'required_deceleration': signal_info.get('required_deceleration', 0.0),
-                'ego_speed_kmh': ego_speed * 3.6,
-                'severity': 'HIGH'
-            }
-            self.signal_violations.append(violation_entry)
-            self.violation_warnings.append(violation_entry)
-            print(f"⚠️  SIGNAL VIOLATION (LIKELY): {signal_info.get('signal_type')} at {signal_info.get('distance', 0):.1f}m")
-            print(f"   Required deceleration: {signal_info.get('required_deceleration', 0):.1f} m/s²")
+        # Print significant signal events
+        if alert_level in ['CRITICAL', 'EMERGENCY']:
+            print(f"🚦 SIGNAL {alert_level}: {signal_type} at {distance:.1f}m")
+            print(f"   Required: {required_decel:.1f} m/s², Max achieved: {self.max_deceleration:.1f} m/s²")
+            if signal_entry['deceleration_deficit'] > 0:
+                print(f"   ⚠️ Deficit: {signal_entry['deceleration_deficit']:.1f} m/s²")
         
     def get_alert_lead_time(self) -> Optional[float]:
         """
@@ -752,12 +886,30 @@ class SimpleTTCLogger:
                 'precision_analysis': self.analyze_alert_precision()
             },
             'signal_compliance_analysis': {
+                # **BASIC SIGNAL EVENT TRACKING**
                 'total_signal_events': len(self.signal_events),
-                'total_violations': len(self.signal_violations),
-                'violation_warnings': len(self.violation_warnings),
                 'signal_events': self.signal_events,
+                
+                # **COMPREHENSIVE SIGNAL COMPLIANCE METRICS** 
+                'signal_compliance_metrics': self.get_signal_compliance_metrics(),
+                
+                # **DECELERATION ANALYSIS**
+                'max_deceleration_achieved': self.max_deceleration,
+                'deceleration_events': self.deceleration_events,
+                'deceleration_capability': {
+                    'assessment': self._assess_deceleration_capability(),
+                    'max_deceleration_ms2': self.max_deceleration,
+                    'events_by_severity': self._categorize_deceleration_events()
+                },
+                
+                # **SIGNAL METRICS SUMMARY**
+                'signal_encounter_summary': self.signal_metrics,
+                
+                # **LEGACY COMPATIBILITY** - maintain old field names
+                'total_violations': len(self.signal_violations),
+                'violation_warnings': len(self.violation_warnings) if hasattr(self, 'violation_warnings') else 0,
                 'signal_violations': self.signal_violations,
-                'violation_summary': self.get_signal_violation_summary()
+                'violation_summary': self.get_signal_violation_summary() if hasattr(self, 'get_signal_violation_summary') else {}
             }
         }
         
@@ -933,3 +1085,104 @@ Violations by Signal Type:"""
             'max_deceleration_required': max_decel,
             'average_violation_distance': avg_violation_distance
         } 
+
+    def get_signal_compliance_metrics(self) -> Dict:
+        """
+        **NEW: Get comprehensive signal compliance and deceleration metrics**
+        
+        Returns:
+            Dictionary with detailed signal compliance analysis
+        """
+        metrics = {
+            # **SIGNAL ENCOUNTER SUMMARY**
+            'signal_metrics': self.signal_metrics.copy(),
+            
+            # **DECELERATION ANALYSIS**
+            'deceleration_analysis': {
+                'max_deceleration_achieved': self.max_deceleration,
+                'total_deceleration_events': len(self.deceleration_events),
+                'deceleration_capability_assessment': self._assess_deceleration_capability(),
+                'deceleration_events_by_severity': self._categorize_deceleration_events()
+            },
+            
+            # **SIGNAL VIOLATION RISK ASSESSMENT**
+            'violation_risk_assessment': {
+                'high_risk_encounters': len([s for s in self.signal_events if s.get('alert_level') in ['CRITICAL', 'EMERGENCY']]),
+                'unable_to_stop_safely': len([s for s in self.signal_events if not s.get('can_stop_safely', True)]),
+                'avg_deceleration_deficit': self._calculate_avg_deceleration_deficit(),
+                'signal_compliance_score': self._calculate_signal_compliance_score()
+            },
+            
+            # **PERFORMANCE INDICATORS**
+            'performance_indicators': {
+                'signal_alert_frequency': len(self.signal_events) / ((time.time() - self.start_time) / 60) if time.time() > self.start_time else 0,  # per minute
+                'emergency_signal_rate': self.signal_metrics['emergency_alerts'] / max(1, self.signal_metrics['total_signals_encountered']),
+                'braking_effectiveness_ratio': self._calculate_braking_effectiveness()
+            }
+        }
+        
+        return metrics
+    
+    def _assess_deceleration_capability(self) -> str:
+        """Assess demonstrated deceleration capability"""
+        if self.max_deceleration >= 10.0:
+            return "EMERGENCY_CAPABLE"     # Can handle emergency signal violations
+        elif self.max_deceleration >= 8.0:
+            return "CRITICAL_CAPABLE"      # Can handle critical signal violations
+        elif self.max_deceleration >= 6.0:
+            return "WARNING_CAPABLE"       # Can handle warning level signals
+        elif self.max_deceleration >= 4.0:
+            return "CAUTIOUS_CAPABLE"      # Can handle cautious level signals
+        else:
+            return "LIMITED_CAPABILITY"    # Limited braking demonstrated
+    
+    def _categorize_deceleration_events(self) -> Dict:
+        """Categorize deceleration events by severity"""
+        categories = {
+            'EMERGENCY': 0, 'CRITICAL': 0, 'WARNING': 0, 
+            'CAUTIOUS': 0, 'MODERATE': 0, 'LIGHT': 0
+        }
+        
+        for event in self.deceleration_events:
+            severity = event.get('severity', 'LIGHT')
+            if severity in categories:
+                categories[severity] += 1
+        
+        return categories
+    
+    def _calculate_avg_deceleration_deficit(self) -> float:
+        """Calculate average deceleration deficit across signal events"""
+        deficits = [s.get('deceleration_deficit', 0.0) for s in self.signal_events]
+        return sum(deficits) / len(deficits) if deficits else 0.0
+    
+    def _calculate_signal_compliance_score(self) -> float:
+        """Calculate signal compliance score (0.0 to 1.0, higher is better)"""
+        if not self.signal_events:
+            return 1.0  # No signals encountered = perfect compliance
+        
+        # Base score from alert level distribution
+        total_signals = len(self.signal_events)
+        emergency_penalty = self.signal_metrics['emergency_alerts'] * 0.4
+        critical_penalty = self.signal_metrics['critical_alerts'] * 0.3
+        warning_penalty = self.signal_metrics['warning_alerts'] * 0.2
+        cautious_penalty = self.signal_metrics['cautious_alerts'] * 0.1
+        
+        penalty_score = (emergency_penalty + critical_penalty + warning_penalty + cautious_penalty) / total_signals
+        base_score = max(0.0, 1.0 - penalty_score)
+        
+        # Bonus for demonstrated braking capability
+        capability_bonus = min(0.2, self.max_deceleration / 50.0)  # Up to 0.2 bonus for high deceleration capability
+        
+        return min(1.0, base_score + capability_bonus)
+    
+    def _calculate_braking_effectiveness(self) -> float:
+        """Calculate braking effectiveness ratio"""
+        if not self.signal_events or self.max_deceleration == 0:
+            return 0.0
+        
+        total_required = sum(s.get('required_deceleration', 0.0) for s in self.signal_events)
+        if total_required == 0:
+            return 1.0
+        
+        # Ratio of available deceleration to total required
+        return min(1.0, (self.max_deceleration * len(self.signal_events)) / total_required) 
