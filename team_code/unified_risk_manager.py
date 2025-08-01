@@ -240,55 +240,79 @@ class UnifiedRiskManager:
         # Store current ego speed for alert filtering
         self._current_ego_speed = ego_speed
         
-        # 1. Calculate external risk (TTC-based) - ALWAYS for measurement, but disable for alerts if needed
-        external_risk_raw, external_breakdown = self.safety_evaluator.calculate_external_risk_unified(
+        # 1. Calculate separated external risks (TTC + Signal Compliance)
+        combined_external_risk, external_breakdown = self.safety_evaluator.calculate_external_risk_unified(
             ego_speed, bounding_boxes
         )
         
-        if self.external_risk_enabled:
-            # Normal mode: Use calculated external risk for alerts
-            external_risk = external_risk_raw
-            print("✅ External risk: Calculated and USED for alerts")
-        else:
-            # EXPERIMENT MODE: Calculate for measurement but disable for alerts
-            external_risk = 0.0
-            external_breakdown['disabled_for_alerts'] = True
-            print(f"📊 External risk: Calculated ({external_risk_raw:.3f}) but DISABLED for alerts")
+        # **EXTRACT SEPARATED RISKS**
+        ttc_risk = external_breakdown.get('ttc_risk', 0.0)
+        signal_risk = external_breakdown.get('signal_risk', 0.0)
+        has_ttc_threat = external_breakdown.get('has_ttc_threat', False)
+        has_signal_threat = external_breakdown.get('has_signal_threat', False)
         
         # 2. Calculate internal risk (driver state)
         internal_risk, is_driver_data_stale = self.get_driver_state_risk()
         
-        # 3. Calculate adaptive weights
-        external_weight, internal_weight = self.calculate_adaptive_weights(
-            external_risk, internal_risk, is_driver_data_stale
-        )
+        # **SEPARATED RISK FUSION STRATEGY**
         
-        # 4. Combine risks with adaptive weighting
-        base_unified_risk = (external_weight * external_risk + 
-                           internal_weight * internal_risk)
-        
-        # 5. Apply synergistic risk amplification
-        # When both external and internal risks are high, the combined risk should be higher
-        synergy_factor = 1.0
-        if external_risk > 0.5 and internal_risk > 0.5:
-            # Amplify risk when both conditions are concerning
-            synergy_multiplier = 1.0 + (external_risk * internal_risk * 0.5)
-            synergy_factor = synergy_multiplier
-            base_unified_risk *= synergy_multiplier
+        # 3a. TTC Risk Fusion - Intelligent fusion with driver state
+        # Distracted drivers need earlier TTC warnings
+        if self.external_risk_enabled:
+            ttc_weight, ttc_internal_weight = self.calculate_adaptive_weights(
+                ttc_risk, internal_risk, is_driver_data_stale
+            )
+            fused_ttc_risk = (ttc_weight * ttc_risk + ttc_internal_weight * internal_risk)
             
-        # 6. Emergency vehicle special handling
-        emergency_boost = 0.0
-        if external_breakdown:
-            primary_threat = external_breakdown.get('primary_threat')
-            if primary_threat and primary_threat.get('is_emergency', False):
-                if internal_risk > 0.3:  # Driver not fully attentive
-                    emergency_boost = 0.2  # Significant boost for emergency + inattentive driver
-                    base_unified_risk += emergency_boost
-                
-        # Cap at 1.0
-        unified_risk = min(base_unified_risk, 1.0)
+            # Apply synergistic amplification for TTC + driver state
+            if ttc_risk > 0.5 and internal_risk > 0.5:
+                synergy_multiplier = 1.0 + (ttc_risk * internal_risk * 0.5)
+                fused_ttc_risk *= synergy_multiplier
+                print(f"🔀 TTC + Driver state synergy: {synergy_multiplier:.2f}x")
+        else:
+            # External risk disabled - only use internal risk
+            fused_ttc_risk = internal_risk
+            ttc_risk = 0.0  # Disable TTC for alerts
         
-        # 7. Determine risk level
+        # 3b. Signal Compliance Risk - Independent handling
+        # Traffic violations are dangerous regardless of driver attention
+        if self.external_risk_enabled:
+            final_signal_risk = signal_risk  # No driver state fusion for signal compliance
+        else:
+            final_signal_risk = 0.0  # Disable signal risk if external risk disabled
+        
+        # **CONDITIONAL ALERTING LOGIC**
+        # Signal alerts suppressed when TTC alerts present (except emergency violations)
+        
+        ttc_alert_active = fused_ttc_risk >= self.risk_thresholds['caution']
+        signal_alert_level = external_breakdown.get('signal_alert_level', 'NONE')
+        signal_is_emergency = signal_alert_level == 'EMERGENCY'
+        
+        # Suppress signal alerts if TTC alerts are active (unless emergency signal violation)
+        if ttc_alert_active and not signal_is_emergency:
+            suppressed_signal_risk = 0.0
+            alert_suppression_active = True
+            print(f"🔇 Signal alerts suppressed due to active TTC alert")
+        else:
+            suppressed_signal_risk = final_signal_risk
+            alert_suppression_active = False
+        
+        # 4. Calculate unified risk from separated components
+        unified_risk = max(fused_ttc_risk, suppressed_signal_risk)
+        
+        # Emergency vehicle special handling (only affects TTC risk)
+        emergency_boost = 0.0
+        primary_threat = external_breakdown.get('primary_threat')
+        if primary_threat and primary_threat.get('is_emergency', False):
+            if internal_risk > 0.6:  # Only boost if driver is distracted
+                emergency_boost = 0.2
+                unified_risk = min(1.0, unified_risk + emergency_boost)
+                print(f"🚨 Emergency vehicle + inattentive driver boost: +{emergency_boost}")
+        
+        # Cap at maximum risk
+        unified_risk = min(unified_risk, 1.0)
+        
+        # 5. Determine risk level
         if unified_risk >= self.risk_thresholds['emergency']:
             risk_level = 'emergency'
         elif unified_risk >= self.risk_thresholds['critical']:
@@ -300,7 +324,7 @@ class UnifiedRiskManager:
         else:
             risk_level = 'safe'
             
-        # 8. Add to risk history for temporal analysis
+        # 6. Add to risk history for temporal analysis
         risk_entry = {
             'timestamp': current_time,
             'unified_risk': unified_risk,
@@ -313,55 +337,104 @@ class UnifiedRiskManager:
         if len(self.risk_history) > self.max_history_length:
             self.risk_history.pop(0)
             
-        # 9. Compile comprehensive result
+        # 7. Compile comprehensive result with separated risk information
         result = {
+            # **UNIFIED RISK RESULT**
             'unified_risk': unified_risk,
-            'external_risk': external_risk,  # Used for alerts (may be 0.0 if disabled)
-            'external_risk_raw': external_risk_raw,  # Always calculated for measurement
-            'internal_risk': internal_risk,
             'risk_level': risk_level,
+            
+            # **SEPARATED RISK COMPONENTS** 
+            'ttc_risk': ttc_risk,                    # Raw TTC risk
+            'signal_risk': signal_risk,              # Raw signal compliance risk  
+            'fused_ttc_risk': fused_ttc_risk,       # TTC risk fused with driver state
+            'final_signal_risk': final_signal_risk, # Final signal risk (may be suppressed)
+            'suppressed_signal_risk': suppressed_signal_risk,  # Signal risk after conditional suppression
+            
+            # **TRADITIONAL EXTERNAL/INTERNAL** - for backward compatibility
+            'external_risk': max(fused_ttc_risk, suppressed_signal_risk),  # For alert logic
+            'external_risk_raw': combined_external_risk,  # Always calculated for measurement
+            'internal_risk': internal_risk,
+            
+            # **CONDITIONAL ALERTING STATUS**
+            'alerting_status': {
+                'ttc_alert_active': ttc_alert_active,
+                'signal_alert_suppressed': alert_suppression_active,
+                'signal_is_emergency': signal_is_emergency,
+                'alert_priority': 'TTC' if ttc_alert_active else 'SIGNAL' if suppressed_signal_risk > 0 else 'NONE'
+            },
+            
+            # **EXPERIMENT CONTROL**
             'experiment_mode': {
                 'external_risk_enabled': self.external_risk_enabled,
                 'external_calculated_but_disabled': not self.external_risk_enabled
             },
+            
+            # **FUSION WEIGHTS**
             'weights': {
-                'external_weight': external_weight,
-                'internal_weight': internal_weight
+                'ttc_weight': ttc_weight if self.external_risk_enabled else 0.0,
+                'ttc_internal_weight': ttc_internal_weight if self.external_risk_enabled else 1.0,
+                'signal_weight': 1.0 if self.external_risk_enabled else 0.0  # Signal risk not fused
             },
+            
+            # **DRIVER STATE**
             'driver_state': {
                 'current_state': self.current_driver_state,
                 'confidence': self.driver_state_confidence,
                 'is_stale': is_driver_data_stale,
                 'last_update': self.last_driver_update
             },
+            
+            # **RISK FACTORS**
             'risk_factors': {
-                'base_unified_risk': base_unified_risk,
-                'synergy_factor': synergy_factor,
-                'emergency_boost': emergency_boost
+                'base_unified_risk': unified_risk,
+                'emergency_boost': emergency_boost,
+                'separation_architecture': True  # Flag indicating separated risk handling
             },
+            
+            # **DETAILED BREAKDOWN** 
             'external_breakdown': external_breakdown,
             'temporal_context': self._analyze_risk_trend(),
             'timestamp': current_time
         }
         
-        # 10. Trigger alerts based on risk level
+        # 8. Trigger alerts based on risk level
         self._handle_risk_alert(result)
         
-        # Debug output
-        print(f"=== UNIFIED RISK ASSESSMENT ===")
+        # Debug output with separated risk information
+        print(f"=== SEPARATED RISK ARCHITECTURE ===")
         if not self.external_risk_enabled:
-            print(f"External Risk: {external_risk:.3f} (calculated: {external_risk_raw:.3f}, DISABLED for alerts)")
+            print(f"🔬 EXPERIMENT MODE: External risks calculated but DISABLED")
+            print(f"   TTC Risk: {ttc_risk:.3f} (calculated, disabled)")
+            print(f"   Signal Risk: {signal_risk:.3f} (calculated, disabled)")
+            print(f"   Using Internal Risk Only: {internal_risk:.3f}")
         else:
-            print(f"External Risk: {external_risk:.3f} (weight: {external_weight:.2f})")
-        print(f"Internal Risk: {internal_risk:.3f} (weight: {internal_weight:.2f})")
-        print(f"Driver State: {self.current_driver_state} (conf: {self.driver_state_confidence:.2f})")
-        print(f"Unified Risk: {unified_risk:.3f}")
-        print(f"Risk Level: {risk_level.upper()}")
-        if synergy_factor > 1.0:
-            print(f"Synergy Amplification: {synergy_factor:.2f}x")
-        if emergency_boost > 0:
-            print(f"Emergency Boost: +{emergency_boost:.2f}")
-        print("===============================")
+            print(f"🎯 TTC Risk: {ttc_risk:.3f} → Fused: {fused_ttc_risk:.3f} (with driver state)")
+            print(f"🚦 Signal Risk: {signal_risk:.3f} → Final: {suppressed_signal_risk:.3f}")
+            if alert_suppression_active:
+                print(f"   🔇 Signal alerts SUPPRESSED (TTC alert active)")
+            if signal_is_emergency:
+                print(f"   🚨 Emergency signal violation - NEVER suppressed")
+        
+        print(f"🔀 Internal Risk: {internal_risk:.3f} (driver: {self.current_driver_state})")
+        print(f"📊 Unified Risk: {unified_risk:.3f} → Level: {risk_level.upper()}")
+        
+        # Show active threats
+        if has_ttc_threat:
+            threat = external_breakdown.get('primary_threat', {})
+            threat_type = threat.get('class_name', 'unknown')
+            distance = threat.get('distance', 0)
+            emergency_flag = " 🚨EMERGENCY" if threat.get('is_emergency', False) else ""
+            print(f"   🎯 TTC Threat: {threat_type}{emergency_flag} at {distance:.1f}m")
+            
+        if has_signal_threat:
+            signal = external_breakdown.get('signal_info', {})
+            signal_type = signal.get('signal_type', 'unknown')
+            distance = signal.get('distance_to_stop_line', 0)
+            decel = signal.get('required_deceleration', 0)
+            level = signal.get('alert_level', 'unknown')
+            print(f"   🚦 Signal: {signal_type} at {distance:.1f}m → {decel:.1f} m/s² ({level})")
+            
+        print("=====================================")
         
         return result
         
