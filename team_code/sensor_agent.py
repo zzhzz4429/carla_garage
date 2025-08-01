@@ -1342,9 +1342,17 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
         self.current_ttc_status = "SAFE" if self.current_ttc_risk < 0.2 else "WARNING" if self.current_ttc_risk < 0.5 else "CRITICAL"
         self.current_ttc_object = external_breakdown.get('primary_threat')
         
-        # Set default values for other risk types (signal, distance, braking)
-        self.current_signal_risk = 0.0
-        self.current_signal_status = "SAFE"
+        # **UPDATED: Set signal risk from separated risk architecture**
+        self.current_signal_risk = external_breakdown.get('signal_risk', 0.0)
+        signal_info = external_breakdown.get('signal_info')
+        if signal_info:
+            # Use the actual signal alert level from the straightforward signal compliance
+            signal_alert_level = signal_info.get('alert_level', 'SAFE')
+            self.current_signal_status = signal_alert_level
+        else:
+            self.current_signal_status = "SAFE"
+            
+        # Set default values for other risk types (distance, braking) 
         self.current_distance_risk = external_breakdown.get('distance_risk', 0.0)
         self.current_distance_status = "SAFE" if self.current_distance_risk < 0.2 else "WARNING"
         self.current_braking_risk = 0.0
@@ -1373,6 +1381,24 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
                 internal_risk=unified_risk_assessment.get('internal_risk', 0.0),
                 driver_state=unified_risk_assessment.get('driver_state', {}).get('current_state', 'unknown')
             )
+            
+            # **NEW: Log signal compliance events for signal compliance metrics**
+            signal_info = external_breakdown.get('signal_info')
+            if signal_info:
+                # Log signal compliance event with comprehensive metrics
+                self.ttc_logger.log_signal_event(
+                    timestamp=timestamp,
+                    signal_info=signal_info,
+                    ego_speed=gt_velocity.item()
+                )
+                
+                # Debug output for signal events (less frequent to avoid spam)
+                if self.step % 50 == 0:
+                    signal_type = signal_info.get('signal_type', 'Unknown')
+                    distance = signal_info.get('distance_to_stop_line', 0.0)
+                    decel = signal_info.get('required_deceleration', 0.0)
+                    level = signal_info.get('alert_level', 'SAFE')
+                    print(f"🚦 Signal: {signal_type} at {distance:.1f}m, {decel:.1f} m/s² ({level})")
         elif hasattr(self, 'ttc_logger') and self.step % 100 == 0:
             print(f"🔍 DEBUG Step {self.step}: TTC logger exists but no bounding boxes")
         
