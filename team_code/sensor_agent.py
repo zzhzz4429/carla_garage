@@ -6,6 +6,7 @@ leaderboard/leaderboard/leaderboard_evaluator.py file
 
 import os
 from copy import deepcopy
+from typing import Dict, List, Optional, Any
 
 import cv2
 import carla
@@ -26,15 +27,22 @@ from nav_planner import extrapolate_waypoint_route
 from filterpy.kalman import MerweScaledSigmaPoints
 from filterpy.kalman import UnscentedKalmanFilter as UKF
 from scipy.optimize import fsolve
+from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
 from scenario_logger import ScenarioLogger
 import transfuser_utils as t_u
+from safety_evaluator import SafetyEvaluator
+from unified_risk_manager import UnifiedRiskManager
 
 import pathlib
 import jsonpickle
 import jsonpickle.ext.numpy as jsonpickle_numpy
 import ujson  # Like json but faster
 import gzip
+import pygame
+import time
+import json
+from datetime import datetime
 
 jsonpickle_numpy.register_handlers()
 jsonpickle.set_encoder_options('json', sort_keys=True, indent=4)
@@ -60,7 +68,107 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
     """
 
   def setup(self, path_to_conf_file, route_index=None, traffic_manager=None):
-    """Sets up the agent. route_index is for logging purposes"""
+    # super().__init__(path_to_conf_file)
+    
+    # Initialize data recording variables
+    self.data_recording = {
+      'session_start_time': datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+      'control_commands': {
+        'ai': [],
+        'human': []
+      },
+      'interventions': [],
+      'control_time': {
+        'ai': 0,
+        'human': 0
+      },
+      'steering_differences': [],
+      'speed_differences': [],
+      'last_mode_switch_time': time.time(),
+      'current_mode': 'autonomous'
+    }
+    
+    # Create a file to save the data with absolute path
+    data_dir = os.path.join(os.getcwd(), "driving_data")
+    os.makedirs(data_dir, exist_ok=True)
+    self.data_file = os.path.join(data_dir, f"driving_data_{self.data_recording['session_start_time']}.json")
+    print(f"Data will be saved to: {os.path.abspath(self.data_file)}")
+    
+    # Record data every N frames
+    self.record_frequency = 10
+    self.last_ai_control = None
+
+    # Initialize pygame display with width for center camera only
+    self.camera_width = 1920
+    self.camera_height = 960
+    self.width = self.camera_width  # Just center camera width
+    self.height = self.camera_height
+    self.display_current_speed = 0
+    self.display_predicted_speed = 0
+    
+    # Initialize pygame with scaling support
+    pygame.init()
+    pygame.font.init()
+    
+    # Get the display info to calculate scaling
+    display_info = pygame.display.Info()
+    screen_w = display_info.current_w
+    screen_h = display_info.current_h
+    
+    # Calculate scale factor to fit screen while maintaining aspect ratio
+    scale_w = screen_w / self.width
+    scale_h = screen_h / self.height
+    scale = min(scale_w, scale_h) * 0.9  # Use 90% of available space
+    
+    # Calculate scaled dimensions
+    scaled_width = int(self.width * scale)
+    scaled_height = int(self.height * scale)
+    
+    # Center the window
+    os.environ['SDL_VIDEO_CENTERED'] = '1'
+    
+    # Create scaled display
+    self._display = pygame.display.set_mode((scaled_width, scaled_height), 
+                                          pygame.HWSURFACE | pygame.DOUBLEBUF | pygame.SCALED)
+    pygame.display.set_caption("Sensor Agent View")
+    self._clock = pygame.time.Clock()
+    
+    # Initialize font for display
+    font_name = 'courier' if os.name == 'nt' else 'mono'
+    fonts = [x for x in pygame.font.get_fonts() if font_name in x]
+    default_font = 'ubuntumono'
+    mono = default_font if default_font in fonts else fonts[0]
+    mono = pygame.font.match_font(mono)
+    # Increase font size for better visibility
+    self._font_mono = pygame.font.Font(mono, 24 if os.name == 'nt' else 28)
+    
+    # Initialize steering wheel control
+    pygame.joystick.init()
+    joystick_count = pygame.joystick.get_count()
+    if joystick_count > 0:
+      if joystick_count > 1:
+        raise ValueError("Please Connect Just One Joystick")
+      self._joystick = pygame.joystick.Joystick(0)
+      self._joystick.init()
+      self._steer_idx = 0
+      self._throttle_idx = 2
+      self._brake_idx = 3
+      self._reverse_idx = 5
+      self._handbrake_idx = 4
+      self._square_idx = 1  # Square button index
+      self.manual_control = False
+      self.brake_pressed = False  # Track brake pedal state
+      self.last_switch_time = 0  # Add debounce timer
+      print("Joystick initialized - Starting in AUTONOMOUS mode")
+    else:
+      self._joystick = None
+      self.manual_control = False  # Ensure this is set even without joystick
+      print("No steering wheel detected - autonomous control only")
+
+    # Set environment variables for better pygame performance
+    os.environ['SDL_VIDEO_X11_VISUAL'] = '0'  # For Linux
+    os.environ['SDL_VIDEO_CENTERED'] = '1'
+    
     torch.cuda.empty_cache()
     self.IS_BENCH2DRIVE = strtobool(os.environ.get('IS_BENCH2DRIVE', 'False'))
     print('IS_BENCH2DRIVE: ', self.IS_BENCH2DRIVE)
@@ -218,6 +326,56 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
       self.save_path = None
 
     self.metric_info = {}
+    self._vehicle = CarlaDataProvider.get_hero_actor()
+    self.world = self._vehicle.get_world()
+
+    # Initialize safety evaluator (for backward compatibility)
+    self.safety_evaluator = SafetyEvaluator(self.config)
+    
+    # Initialize unified risk manager (combines external TTC + internal driver state)
+    self.unified_risk_manager = UnifiedRiskManager(
+        config=self.config,
+        udp_port=int(os.environ.get('DRIVER_STATE_UDP_PORT', 9999)),
+        audio_enabled=strtobool(os.environ.get('AUDIO_ALERTS_ENABLED', 'True'))
+    )
+
+    # Add this to the setup() method, after the unified_risk_manager initialization:
+    
+    # Initialize simple TTC logger if enabled
+    ttc_logging_env = os.environ.get('ENABLE_TTC_LOGGING', 'False')
+    print(f"🔍 DEBUG: ENABLE_TTC_LOGGING = '{ttc_logging_env}'")
+    
+    if ttc_logging_env.lower() == 'true':
+        print("🔍 DEBUG: Attempting to initialize TTC logger...")
+        try:
+            from simple_ttc_logger import SimpleTTCLogger
+            
+            experiment_condition = os.environ.get('EXPERIMENT_CONDITION', 'fusion')
+            participant_id = os.environ.get('PARTICIPANT_ID', 'P001')
+            trial_number = os.environ.get('TRIAL_NUMBER', '1')
+            scenario_name = os.environ.get('SCENARIO_NAME', 'SC-EV')
+            
+            print(f"🔍 DEBUG: Creating logger with condition={experiment_condition}, participant={participant_id}, trial={trial_number}, scenario={scenario_name}")
+            
+            self.ttc_logger = SimpleTTCLogger(
+                experiment_condition=experiment_condition,
+                participant_id=participant_id,
+                trial_number=trial_number,
+                scenario_name=scenario_name
+            )
+            print(f"📊 TTC logging enabled successfully!")
+            
+            # Connect logger to unified risk manager for alert tracking
+            self.unified_risk_manager.set_experiment_logger(self.ttc_logger)
+            
+        except Exception as e:
+            print(f"❌ ERROR: Failed to initialize TTC logger: {e}")
+            self.ttc_logger = None
+    else:
+        print("🔍 DEBUG: TTC logging disabled")
+        self.ttc_logger = None
+
+
 
   def _init(self):
     # The CARLA leaderboard does not expose the lat lon reference value of the GPS which make it impossible to use the
@@ -272,43 +430,76 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
     self.initialized = True
 
   def sensors(self):
-    sensors = [{
+    """
+    Define the sensor suite of the agent
+    """
+    sensors = [
+      {
         'type': 'sensor.camera.rgb',
-        'x': self.config.camera_pos[0],
-        'y': self.config.camera_pos[1],
-        'z': self.config.camera_pos[2],
-        'roll': self.config.camera_rot_0[0],
-        'pitch': self.config.camera_rot_0[1],
-        'yaw': self.config.camera_rot_0[2],
-        'width': self.config.camera_width,
-        'height': self.config.camera_height,
-        'fov': self.config.camera_fov,
-        'id': 'rgb_front'
-    }, {
-        'type': 'sensor.other.imu',
-        'x': 0.0,
-        'y': 0.0,
-        'z': 0.0,
-        'roll': 0.0,
-        'pitch': 0.0,
-        'yaw': 0.0,
-        'sensor_tick': self.config.carla_frame_rate,
-        'id': 'imu'
-    }, {
-        'type': 'sensor.other.gnss',
-        'x': 0.0,
-        'y': 0.0,
-        'z': 0.0,
-        'roll': 0.0,
-        'pitch': 0.0,
-        'yaw': 0.0,
-        'sensor_tick': 0.01,
-        'id': 'gps'
-    }, {
-        'type': 'sensor.speedometer',
-        'reading_frequency': self.config.carla_fps,
-        'id': 'speed'
-    }]
+        'x': 1.4, 'y': 0.0, 'z': 1.2,
+        'roll': 0.0, 'pitch': .0, 'yaw': 0.0,
+        'width': self.camera_width, 'height': self.camera_height, 'fov': 110,
+        'id': 'Center'
+      },
+			# Left mirror - reduced resolution
+			{'type': 'sensor.camera.rgb',
+			 'x': 0.7, 'y': -1.0, 'z': 1.0,
+			 'roll': 0.0, 'pitch': 0.0, 'yaw': 210.0,
+			 'width': int(self.camera_width * 0.3),
+			 'height': int(self.camera_height * 0.3),
+			 'fov': 100, 'id': 'Left'},
+
+			# Right mirror - reduced resolution
+			{'type': 'sensor.camera.rgb',
+			 'x': 0.7, 'y': 1.0, 'z': 1.0,
+			 'roll': 0.0, 'pitch': 0.0, 'yaw': 150.0,
+			 'width': int(self.camera_width * 0.3),
+			 'height': int(self.camera_height * 0.3),
+			 'fov': 100, 'id': 'Right'},
+    ]
+    # Add existing sensors
+    sensors.extend([
+        {
+            'type': 'sensor.camera.rgb',
+            'x': self.config.camera_pos[0],
+            'y': self.config.camera_pos[1],
+            'z': self.config.camera_pos[2],
+            'roll': self.config.camera_rot_0[0],
+            'pitch': self.config.camera_rot_0[1],
+            'yaw': self.config.camera_rot_0[2],
+            'width': self.config.camera_width,
+            'height': self.config.camera_height,
+            'fov': self.config.camera_fov,
+            'id': 'rgb_front'
+        },
+        {
+            'type': 'sensor.other.imu',
+            'x': 0.0,
+            'y': 0.0,
+            'z': 0.0,
+            'roll': 0.0,
+            'pitch': 0.0,
+            'yaw': 0.0,
+            'sensor_tick': self.config.carla_frame_rate,
+            'id': 'imu'
+        },
+        {
+            'type': 'sensor.other.gnss',
+            'x': 0.0,
+            'y': 0.0,
+            'z': 0.0,
+            'roll': 0.0,
+            'pitch': 0.0,
+            'yaw': 0.0,
+            'sensor_tick': 0.01,
+            'id': 'gps'
+        },
+        {
+            'type': 'sensor.speedometer',
+            'reading_frequency': self.config.carla_fps,
+            'id': 'speed'
+        }
+    ])
     # Don't set up LiDAR for camera only approaches
     if self.config.backbone not in ('aim'):
       sensors.append({
@@ -362,8 +553,24 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
       self.ukf.x = np.array([gps_pos[0], gps_pos[1], t_u.normalize_angle(compass), speed])
       self.filter_initialized = True
 
-    self.ukf.predict(steer=self.control.steer, throttle=self.control.throttle, brake=self.control.brake)
-    self.ukf.update(np.array([gps_pos[0], gps_pos[1], t_u.normalize_angle(compass), speed]))
+    # Safety checks for control values
+    if not hasattr(self, 'control') or self.control is None:
+      # If control is not initialized, use neutral values
+      steer, throttle, brake = 0.0, 0.0, 0.0
+    else:
+      # Ensure control values are within valid ranges
+      steer = np.clip(float(self.control.steer), -1.0, 1.0)
+      throttle = np.clip(float(self.control.throttle), 0.0, 1.0)
+      brake = float(self.control.brake > 0.0)  # Convert to binary value
+
+    try:
+      self.ukf.predict(steer=steer, throttle=throttle, brake=brake)
+      self.ukf.update(np.array([gps_pos[0], gps_pos[1], t_u.normalize_angle(compass), speed]))
+    except np.linalg.LinAlgError:
+      print("UKF failed, reinitializing...")
+      self.ukf.x = np.array([gps_pos[0], gps_pos[1], t_u.normalize_angle(compass), speed])
+      self.ukf.P = np.diag([1.0, 1.0, 0.1, 0.1])
+
     filtered_state = self.ukf.x
     self.state_log.append(filtered_state)
     result['gps'] = filtered_state[0:2]
@@ -409,9 +616,278 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
 
     return result
 
+
+
+  def draw_unified_risk_info(self, surface, unified_assessment):
+    """Draw unified risk assessment information display with speed and traffic info"""
+    
+    # Define colors for different risk levels
+    status_colors = {
+        "safe": (50, 255, 50),      # Green
+        "caution": (255, 255, 50),  # Yellow
+        "warning": (255, 165, 0),   # Orange
+        "critical": (255, 50, 50),  # Red
+        "emergency": (255, 0, 255)  # Magenta
+    }
+    
+    # Emergency vehicle color (cyan/teal)
+    emergency_color = (0, 255, 255)
+    
+    # Extract values from unified assessment
+    unified_risk = unified_assessment['unified_risk']
+    risk_level = unified_assessment['risk_level']
+    external_risk = unified_assessment['external_risk']
+    internal_risk = unified_assessment['internal_risk']
+    driver_state = unified_assessment['driver_state']['current_state']
+    driver_confidence = unified_assessment['driver_state']['confidence']
+    is_stale = unified_assessment['driver_state']['is_stale']
+    
+    # Check for emergency vehicle
+    emergency_indicator = ""
+    primary_threat = unified_assessment['external_breakdown'].get('primary_threat')
+    if primary_threat and primary_threat.get('is_emergency', False):
+        emergency_indicator = " [EMERGENCY]"
+    
+    # Create text lines
+    texts = []
+    
+    # Unified risk (main display)
+    risk_color = status_colors.get(risk_level, (255, 255, 255))
+    if emergency_indicator:
+        risk_color = emergency_color
+    
+    texts.append((f"=== UNIFIED RISK ===", (255, 255, 255)))
+    texts.append((f"Risk: {unified_risk:.3f}", risk_color))
+    texts.append((f"Level: {risk_level.upper()}{emergency_indicator}", risk_color))
+    texts.append(("", (255, 255, 255)))  # Spacer
+    
+    # External risk component
+    texts.append((f"External: {external_risk:.3f}", status_colors.get("caution", (255, 255, 255))))
+    if primary_threat:
+        threat_distance = primary_threat.get('distance', 0)
+        threat_type = primary_threat.get('class_name', 'object')
+        texts.append((f"Threat: {threat_type} @ {threat_distance:.1f}m", (255, 255, 255)))
+    
+    texts.append(("", (255, 255, 255)))  # Spacer
+    
+    # Internal risk component
+    driver_color = (255, 50, 50) if driver_state != 'safe_driving' else (50, 255, 50)
+    if is_stale:
+        driver_color = (128, 128, 128)  # Gray for stale data
+        
+    texts.append((f"Internal: {internal_risk:.3f}", driver_color))
+    stale_indicator = " [STALE]" if is_stale else ""
+    texts.append((f"Driver: {driver_state}{stale_indicator}", driver_color))
+    texts.append((f"Confidence: {driver_confidence:.2f}", driver_color))
+    
+    texts.append(("", (255, 255, 255)))  # Spacer
+    
+    # === EGO SPEED (MOVED HERE) ===
+    ego_speed_kmh = self.display_current_speed * 3.6
+    speed_color = (255, 255, 255)
+    if ego_speed_kmh > 60:
+        speed_color = (255, 165, 0)  # Orange for high speed
+    elif ego_speed_kmh > 80:
+        speed_color = (255, 50, 50)  # Red for very high speed
+    
+    texts.append((f"=== VEHICLE STATUS ===", (255, 255, 255)))
+    texts.append((f"Speed: {ego_speed_kmh:.1f} km/h", speed_color))
+    
+    # === TRAFFIC SIGNALS (MOVED HERE AND ENHANCED) ===
+    # Get ALL detected traffic signals, not just dangerous ones
+    all_signals = self.get_all_traffic_signals()
+    
+    if all_signals:
+        texts.append(("", (255, 255, 255)))  # Spacer
+        texts.append((f"=== TRAFFIC SIGNALS ===", (255, 255, 255)))
+        
+        for signal in all_signals[:3]:  # Show up to 3 closest signals
+            signal_type = signal.get('signal_type', 'Unknown')
+            distance = signal.get('distance', 0)
+            risk = signal.get('signal_risk', 0)
+            
+            if signal_type == 'Red Light':
+                signal_color = (255, 50, 50)
+                icon = "🔴"
+            elif signal_type == 'Stop Sign':
+                signal_color = (255, 165, 0)
+                icon = "🛑"
+            else:
+                signal_color = (255, 255, 255)
+                icon = "⚠️"
+                
+            texts.append((f"{icon} {signal_type}: {distance:.1f}m", signal_color))
+            
+            # Show risk level if it's significant
+            if risk > 0.1:
+                risk_text = f"Risk: {risk:.2f}"
+                texts.append((f"  {risk_text}", signal_color))
+    else:
+        texts.append(("", (255, 255, 255)))  # Spacer
+        texts.append(("=== TRAFFIC SIGNALS ===", (255, 255, 255)))
+        texts.append(("No Signals Detected", (50, 255, 50)))
+    
+    texts.append(("", (255, 255, 255)))  # Spacer
+    
+    # Risk weights
+    weights = unified_assessment.get('weights', {})
+    ext_weight = weights.get('external_weight', 0)
+    int_weight = weights.get('internal_weight', 0)
+    texts.append((f"Weights: Ext {ext_weight:.1f} Int {int_weight:.1f}", (200, 200, 200)))
+    
+    # Synergy info
+    synergy_factor = unified_assessment.get('risk_factors', {}).get('synergy_factor', 1.0)
+    if synergy_factor > 1.0:
+        texts.append((f"Synergy: {synergy_factor:.2f}x", (255, 165, 0)))
+    
+    # Render text lines
+    rendered_texts = []
+    max_width = 0
+    total_height = 0
+    line_height = self._font_mono.get_height()
+    
+    for text, color in texts:
+        if text:  # Skip empty spacer lines for width calculation
+            rendered = self._font_mono.render(text, True, color)
+            rendered_texts.append(rendered)
+            max_width = max(max_width, rendered.get_width())
+        else:
+            rendered_texts.append(None)  # Spacer
+        total_height += line_height + 2  # 2px spacing between lines
+    
+    # Position in bottom-left corner to avoid mirror overlap
+    pos_x = 20  # 20px padding from left
+    pos_y = surface.get_height() - total_height - 100  # 100px from bottom
+    
+    # Create semi-transparent background
+    bg = pygame.Surface((max_width + 20, total_height + 20))
+    bg.fill((0, 0, 0))
+    bg.set_alpha(128)
+    
+    # Draw background
+    surface.blit(bg, (pos_x - 10, pos_y - 10))
+    
+    # Draw text lines
+    current_y = pos_y
+    for rendered in rendered_texts:
+        if rendered:  # Skip spacer lines
+            surface.blit(rendered, (pos_x, current_y))
+        current_y += line_height + 2
+
+  def get_all_traffic_signals(self):
+    """Get all detected traffic signals regardless of danger level"""
+    all_signals = []
+    
+    # Check if we have bounding boxes
+    if hasattr(self, 'bb_buffer') and len(self.bb_buffer) > 0:
+        for bb in self.bb_buffer[-1]:
+            if len(bb) > 7:
+                class_id = int(bb[7])
+                distance = bb[0]
+                
+                # Class IDs: 2 = Red Light, 3 = Stop Sign
+                if class_id == 2:  # Red Light
+                    all_signals.append({
+                        'signal_type': 'Red Light',
+                        'distance': distance,
+                        'signal_risk': 0.0,  # Default, could be calculated
+                        'class_id': class_id
+                    })
+                elif class_id == 3:  # Stop Sign
+                    all_signals.append({
+                        'signal_type': 'Stop Sign', 
+                        'distance': distance,
+                        'signal_risk': 0.0,  # Default, could be calculated
+                        'class_id': class_id
+                    })
+    
+    # Sort by distance (closest first)
+    all_signals.sort(key=lambda x: x['distance'])
+    
+    return all_signals
+
+  def draw_risk_info(self, surface, ttc_risk, ttc_status, signal_risk, signal_status, 
+                     distance_risk, distance_status, braking_risk, braking_status):
+    """Draw risk assessment information display (legacy version)"""
+    
+    # Define colors for different risk levels
+    status_colors = {
+        "SAFE": (50, 255, 50),      # Green
+        "CAUTION": (255, 255, 50),  # Yellow
+        "WARNING": (255, 165, 0),   # Orange
+        "CRITICAL": (255, 50, 50)   # Red
+    }
+    
+    # Emergency vehicle color (cyan/teal)
+    emergency_color = (0, 255, 255)
+    
+    # Create text lines
+    texts = []
+    
+    # Check if there's an emergency vehicle in TTC calculation
+    emergency_indicator = ""
+    ttc_color = status_colors.get(ttc_status, (255, 255, 255))
+    
+    # Check for emergency vehicle in the most recent TTC object
+    if hasattr(self, 'current_ttc_object') and self.current_ttc_object:
+        if self.current_ttc_object.get('is_emergency', False):
+            emergency_indicator = " [EMERGENCY]"
+            ttc_color = emergency_color
+    
+    texts.append((f"TTC Risk: {ttc_risk:.3f}{emergency_indicator}", ttc_color))
+    texts.append((f"Status: {ttc_status}", ttc_color))
+    texts.append(("", (255, 255, 255)))  # Spacer
+    texts.append((f"Signal Risk: {signal_risk:.3f}", status_colors.get(signal_status, (255, 255, 255))))
+    texts.append((f"Status: {signal_status}", status_colors.get(signal_status, (255, 255, 255))))
+    texts.append(("", (255, 255, 255)))  # Spacer
+    texts.append((f"Distance Risk: {distance_risk:.3f}", status_colors.get(distance_status, (255, 255, 255))))
+    texts.append((f"Status: {distance_status}", status_colors.get(distance_status, (255, 255, 255))))
+    texts.append(("", (255, 255, 255)))  # Spacer
+    texts.append((f"Braking Risk: {braking_risk:.3f}", status_colors.get(braking_status, (255, 255, 255))))
+    texts.append((f"Status: {braking_status}", status_colors.get(braking_status, (255, 255, 255))))
+    
+    # Render text lines
+    rendered_texts = []
+    max_width = 0
+    total_height = 0
+    line_height = self._font_mono.get_height()
+    
+    for text, color in texts:
+        if text:  # Skip empty spacer lines for width calculation
+            rendered = self._font_mono.render(text, True, color)
+            rendered_texts.append(rendered)
+            max_width = max(max_width, rendered.get_width())
+        else:
+            rendered_texts.append(None)  # Spacer
+        total_height += line_height + 2  # 2px spacing between lines
+    
+    # Position in top-left corner with padding
+    pos_x = 20  # 20px padding from left
+    pos_y = 20  # 20px padding from top
+    
+    # Create semi-transparent background
+    bg = pygame.Surface((max_width + 20, total_height + 20))
+    bg.fill((0, 0, 0))
+    bg.set_alpha(128)
+    
+    # Draw background
+    surface.blit(bg, (pos_x - 10, pos_y - 10))
+    
+    # Draw text lines
+    current_y = pos_y
+    for rendered in rendered_texts:
+        if rendered:  # Skip spacer lines
+            surface.blit(rendered, (pos_x, current_y))
+        current_y += line_height + 2
+
   @torch.inference_mode()  # Turns off gradient computation
-  def run_step(self, input_data, timestamp, sensors=None):  # pylint: disable=locally-disabled, unused-argument
+  def run_step(self, input_data, timestamp):
     self.step += 1
+    current_time = time.time()
+    
+    # Define mirror dimensions
+    mirror_width = int(self._display.get_width() * 0.2)  # 20% of display width
+    mirror_height = int(self._display.get_height() * 0.2)  # 20% of display height
 
     if not self.initialized:
       self._init()
@@ -424,6 +900,38 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
 
     # Need to run this every step for GPS filtering
     tick_data = self.tick(input_data)
+
+    # Process all pygame events once
+    for event in pygame.event.get():
+      if event.type == pygame.QUIT:
+        # Save data before quitting
+        # self.save_recorded_data()
+        return
+      elif event.type == pygame.JOYBUTTONDOWN:
+        if event.button == self._square_idx:  # Square button
+          if current_time - self.last_switch_time > 0.2:
+            # Record intervention if switching from autonomous to manual
+            if not self.manual_control:
+              self.data_recording['interventions'].append({
+                'time': current_time,
+                'step': self.step,
+                'reason': 'button_press'
+              })
+            
+            # Update control time before switching modes
+            mode_duration = current_time - self.data_recording['last_mode_switch_time']
+            if self.manual_control:
+              self.data_recording['control_time']['human'] += mode_duration
+            else:
+              self.data_recording['control_time']['ai'] += mode_duration
+            
+            # Switch control mode
+            self.manual_control = not self.manual_control
+            self.data_recording['current_mode'] = 'manual' if self.manual_control else 'autonomous'
+            self.data_recording['last_mode_switch_time'] = current_time
+            self.last_switch_time = current_time
+            
+
 
     lidar_indices = []
     for i in range(self.config.lidar_seq_len):
@@ -576,11 +1084,11 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
 
     # calculate target speed scalar from model predictions
     if self.config.use_controller_input_prediction:
-      pred_target_speed_ensemble = torch.stack(pred_target_speeds,
-                                               dim=0).mean(dim=0)  # average across ensemble models' prediction
+      pred_target_speed_ensemble = torch.stack(pred_target_speeds, dim=0).mean(dim=0)
 
       if self.uncertainty_weight:
         uncertainty = pred_target_speed_ensemble.detach().cpu().numpy()
+        self.last_uncertainty = uncertainty  # Store for display
         if uncertainty[0] > self.config.brake_uncertainty_threshold:
           pred_target_speed_scalar = self.inference_target_speeds[0]
         else:
@@ -624,6 +1132,65 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
                                                         tuned_aim_distance=bool(self.tuned_aim_distance))
     else:
       raise ValueError('An output representation was chosen that was not trained.')
+    # print(f"Predicted speed: {pred_target_speed_scalar}")
+    # print(f"Current speed: {gt_velocity}")
+    # Draw predicted waypoints trajectory
+    if pred_checkpoints is not None:
+        # Get current speed in km/h
+        # current_speed = input_data['speed'][1]['speed'] * 3.6
+        # Convert torch tensor to scalar value
+        if torch.is_tensor(gt_velocity):
+            current_speed = gt_velocity.item()
+        else:
+            current_speed = gt_velocity
+        self.display_current_speed = current_speed
+        
+        
+        # Get predicted target speed if available
+        predicted_speed = pred_target_speed_scalar 
+        self.display_predicted_speed = predicted_speed
+        # print(f"Predicted speed: {predicted_speed}")
+        # print(f"Current speed: {current_speed}")
+        
+        # Determine waypoint color based on speed difference
+        speed_diff = abs(current_speed*3.6 - predicted_speed*3.6)
+        waypoint_color = carla.Color(255, 0, 0) if speed_diff > 5.0 else carla.Color(0, 0, 255)  # Red if diff > 5km/h, blue otherwise
+        
+        # If pred_checkpoints is a torch tensor, convert to numpy
+        if torch.is_tensor(pred_checkpoints):
+            draw_wps = pred_checkpoints.detach().cpu().numpy()
+        else:
+            draw_wps = pred_checkpoints
+            
+        # Get ego vehicle transform
+        ego_transform = self._vehicle.get_transform()
+        
+        # Draw all checkpoint sequences
+        for checkpoint_idx, checkpoint_seq in enumerate(draw_wps):
+            num_wp = len(checkpoint_seq)
+            prev_wp_world = ego_transform.location
+            
+            for idx in range(num_wp//2):
+                x_coord = checkpoint_seq[idx]
+                y_coord = checkpoint_seq[idx + num_wp//2]
+                
+                # Convert from local to world coordinate system
+                wp_local = carla.Location(
+                    x=float(x_coord),
+                    y=float(y_coord),
+                    z=0.5
+                )
+                
+                # Transform from local to world coordinates
+                wp_world = ego_transform.transform(wp_local)
+                
+                # Draw point with color based on speed difference
+                self.world.debug.draw_point(
+                    wp_world,
+                    size=0.3,
+                    color=waypoint_color,
+                    life_time=0.1
+                )
 
     # 0.1 is just an arbitrary low number to threshold when the car is stopped
     if gt_velocity < 0.1:
@@ -675,7 +1242,168 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
       throttle = 0.0
       brake = True
 
+    # Create control command (throttle and brake may have been modified by unified risk manager)
     control = carla.VehicleControl(steer=float(steer), throttle=float(throttle), brake=float(brake))
+    ai_control = control
+
+    # =================================================================
+    # UNIFIED RISK ASSESSMENT - Combines external TTC + internal driver state
+    # =================================================================
+    if self.config.detect_boxes and hasattr(self, 'bb_buffer') and len(self.bb_buffer) > 0:
+        # Update time for plotting using actual timestamp
+        frame_time = timestamp  # Use actual timestamp instead of assuming 10 Hz
+        self.unified_risk_manager.safety_evaluator.update_time(frame_time)
+        self.unified_risk_manager.safety_evaluator.update_timestamp(timestamp)
+        
+        # Print all detected objects for debugging
+        if strtobool(os.environ.get('DEBUG_OBJECTS', 'False')):
+            print("=== All Detected Objects ===")
+            object_types = {0: "Vehicle", 1: "Pedestrian", 2: "Red Light", 3: "Stop Sign", 4: "Emergency Vehicle"}
+            for i, bb in enumerate(self.bb_buffer[-1]):
+                if len(bb) > 7:
+                    obj_type = object_types.get(bb[7], f"Unknown({bb[7]})")
+                    speed = bb[5] if len(bb) > 5 and bb[5] is not None else "N/A"
+                    distance = bb[0]
+                    lateral_pos = bb[1]
+                    print(f"  {obj_type} {i}: Speed={speed} m/s, Distance={distance:.1f}m, Lateral={lateral_pos:.1f}m")
+            print("=============================")
+        
+        # UNIFIED RISK CALCULATION - Main risk assessment
+        unified_risk_assessment = self.unified_risk_manager.calculate_unified_risk(
+            ego_speed=gt_velocity.item(),
+            bounding_boxes=self.bb_buffer[-1]
+        )
+        
+        # Extract key risk information
+        unified_risk = unified_risk_assessment['unified_risk']
+        risk_level = unified_risk_assessment['risk_level']
+        external_risk = unified_risk_assessment['external_risk']
+        internal_risk = unified_risk_assessment['internal_risk']
+        driver_state = unified_risk_assessment['driver_state']['current_state']
+        
+        # Store unified risk assessment for display
+        self.current_unified_assessment = unified_risk_assessment
+        
+        # =================================================================
+        # RISK-AWARE CONTROL MODIFICATIONS
+        # =================================================================
+        
+        # Apply risk-based control adjustments if enabled
+        if strtobool(os.environ.get('RISK_AWARE_CONTROL', 'True')):
+            original_throttle, original_brake = throttle, brake
+            
+            # Apply risk-based speed adjustments
+            if risk_level == 'emergency':
+                # Emergency: Aggressive braking
+                throttle = 0.0
+                brake = min(1.0, unified_risk)
+                print(f"🚨 EMERGENCY BRAKING: brake={brake:.2f}")
+                
+            elif risk_level == 'critical':
+                # Critical: Strong deceleration
+                if driver_state in ['sleepy', 'using_phone']:
+                    # More aggressive if driver is inattentive
+                    throttle *= 0.3
+                    brake = max(brake, 0.4)
+                else:
+                    throttle *= 0.5
+                    brake = max(brake, 0.3)
+                print(f"⚠️ CRITICAL DECELERATION: throttle={throttle:.2f}")
+                
+            elif risk_level == 'warning':
+                # Warning: Moderate speed reduction
+                speed_factor = 1.0 - (unified_risk * 0.3)
+                throttle *= speed_factor
+                print(f"⚠️ WARNING SPEED REDUCTION: factor={speed_factor:.2f}")
+                
+            elif risk_level == 'caution':
+                # Caution: Slight speed reduction
+                if driver_state != 'safe_driving':
+                    # Be more conservative if driver is not fully alert
+                    speed_factor = 1.0 - (unified_risk * 0.2)
+                    throttle *= speed_factor
+                    print(f"⚠️ CAUTION (driver {driver_state}): factor={speed_factor:.2f}")
+            
+            # Apply emergency vehicle yielding behavior
+            primary_threat = unified_risk_assessment['external_breakdown'].get('primary_threat')
+            if primary_threat and primary_threat.get('is_emergency', False):
+                # Emergency vehicle detected - implement yielding behavior
+                if external_risk > 0.3:
+                    throttle *= 0.6  # Reduce speed for yielding
+                    print("🚑 EMERGENCY VEHICLE YIELDING")
+        
+        # =================================================================
+        # LEGACY COMPATIBILITY - Keep old risk values for existing displays
+        # =================================================================
+        
+        # Extract individual risk components for backward compatibility
+        external_breakdown = unified_risk_assessment.get('external_breakdown', {})
+        self.current_ttc_risk = external_breakdown.get('ttc_risk', 0.0)
+        self.current_ttc_status = "SAFE" if self.current_ttc_risk < 0.2 else "WARNING" if self.current_ttc_risk < 0.5 else "CRITICAL"
+        self.current_ttc_object = external_breakdown.get('primary_threat')
+        
+        # Set default values for other risk types (signal, distance, braking)
+        self.current_signal_risk = 0.0
+        self.current_signal_status = "SAFE"
+        self.current_distance_risk = external_breakdown.get('distance_risk', 0.0)
+        self.current_distance_status = "SAFE" if self.current_distance_risk < 0.2 else "WARNING"
+        self.current_braking_risk = 0.0
+        self.current_braking_status = "SAFE"
+        
+        # =================================================================
+        # TTC DATA LOGGING - Log risk assessment data for experiments
+        # =================================================================
+        
+        # Log TTC data if logger is enabled
+        if hasattr(self, 'ttc_logger') and self.ttc_logger:
+            # Get TTC object from external breakdown
+            ttc_object = external_breakdown.get('primary_threat')
+            
+            # Debug output (only every 100 frames to avoid spam)
+            if self.step % 100 == 0:
+                print(f"🔍 DEBUG Step {self.step}: TTC logger active, ttc_object={ttc_object is not None}")
+                if ttc_object:
+                    print(f"    TTC object: {ttc_object.get('class_name', 'unknown')} at {ttc_object.get('distance', 0):.1f}m")
+            
+            # Log the TTC data
+            self.ttc_logger.log_ttc_data(
+                timestamp=timestamp,
+                ttc_object=ttc_object,
+                ego_speed=gt_velocity.item(),
+                internal_risk=unified_risk_assessment.get('internal_risk', 0.0),
+                driver_state=unified_risk_assessment.get('driver_state', {}).get('current_state', 'unknown')
+            )
+        elif hasattr(self, 'ttc_logger') and self.step % 100 == 0:
+            print(f"🔍 DEBUG Step {self.step}: TTC logger exists but no bounding boxes")
+        
+    else:
+        # Initialize default values if no safety evaluation
+        if not hasattr(self, 'current_unified_assessment'):
+            self.current_unified_assessment = {
+                'unified_risk': 0.0,
+                'risk_level': 'safe',
+                'external_risk': 0.0,
+                'internal_risk': 0.0,
+                'driver_state': {
+                    'current_state': 'safe_driving',
+                    'confidence': 0.0,
+                    'is_stale': True
+                },
+                'weights': {'external_weight': 0.6, 'internal_weight': 0.4},
+                'external_breakdown': {},
+                'risk_factors': {'synergy_factor': 1.0}
+            }
+            
+        # Legacy compatibility
+        self.current_ttc_risk = 0.0
+        self.current_ttc_status = "SAFE"
+        self.current_ttc_object = None
+        self.current_signal_risk = 0.0
+        self.current_signal_status = "SAFE"
+        self.current_distance_risk = 0.0
+        self.current_distance_status = "SAFE"
+        self.current_braking_risk = 0.0
+        self.current_braking_status = "SAFE"
 
     if self.IS_BENCH2DRIVE:
       # TODO doesn't seem to work
@@ -692,6 +1420,193 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
     else:
       self.control = control
 
+    # Process and display camera views
+    if 'Center' in input_data:
+      # Clear the display
+      self._display.fill((0, 0, 0))
+      
+      # Draw center camera view
+      image = input_data['Center'][1][:, :, :3][:, :, ::-1]
+      surface = pygame.surfarray.make_surface(image.swapaxes(0, 1))
+      # Scale surface to match display size
+      surface = pygame.transform.scale(surface, (self._display.get_width(), self._display.get_height()))
+      self._display.blit(surface, (0, 0))
+      
+      # Draw mirrors if available
+      if 'Right' in input_data:
+        right_mirror = input_data['Right'][1][:, :, :3][:, :, ::-1]
+        right_surface = pygame.surfarray.make_surface(right_mirror.swapaxes(0, 1))
+        right_surface = pygame.transform.scale(right_surface, (mirror_width, mirror_height))
+        mirror_x = self._display.get_width() - mirror_width - 10  # 10 pixels padding
+        mirror_y = 10  # 10 pixels from top
+        self._display.blit(right_surface, (mirror_x, mirror_y))
+      
+      if 'Left' in input_data:
+        left_mirror = input_data['Left'][1][:, :, :3][:, :, ::-1]
+        left_surface = pygame.surfarray.make_surface(left_mirror.swapaxes(0, 1))
+        left_surface = pygame.transform.scale(left_surface, (mirror_width, mirror_height))
+        mirror_x = 10  # 10 pixels padding
+        mirror_y = 10  # 10 pixels from top
+        self._display.blit(left_surface, (mirror_x, mirror_y))
+      
+      # Draw unified risk assessment information (now includes traffic signals and speed)
+      if hasattr(self, 'current_unified_assessment'):
+          self.draw_unified_risk_info(self._display, self.current_unified_assessment)
+      
+      # Draw FPS and control mode text
+      fps = self._clock.get_fps()
+      mode_text = "Manual Control" if self.manual_control else "Autonomous Control" 
+      fps_text = self._font_mono.render(f'FPS: {fps:.0f} - {mode_text} (Press Square to switch)', True, (255, 255, 255))
+      text_width = fps_text.get_width()
+      text_height = fps_text.get_height()
+      text_x = (self._display.get_width() - text_width) // 2  # Center horizontally
+      text_y = self._display.get_height() - text_height - 10  # 10 pixels from bottom
+      
+      # Draw semi-transparent background for text
+      text_background = pygame.Surface((text_width + 20, text_height + 10))
+      text_background.fill((0, 0, 0))
+      text_background.set_alpha(128)
+      self._display.blit(text_background, (text_x - 10, text_y - 5))
+      
+      # Draw text
+      self._display.blit(fps_text, (text_x, text_y))
+      
+      # Update display
+      pygame.display.flip()
+
+    # Handle steering wheel input if available
+    if self._joystick is not None:
+      # Get joystick inputs
+      numAxes = self._joystick.get_numaxes()
+      jsInputs = [float(self._joystick.get_axis(i)) for i in range(numAxes)]
+      
+      # Debug brake value
+      if self.step < 10 or self.step % 100 == 0:
+        print(f"Raw brake value: {jsInputs[self._brake_idx]}")
+      
+      # Process brake pedal for manual control
+      brake_value = jsInputs[self._brake_idx]
+      
+      # Convert brake value to command before using it for control switching
+      brake_cmd = 1.6 + (2.05 * math.log10(-0.7 * jsInputs[self._brake_idx] + 1.4) - 1.2) / 0.92
+      if brake_cmd <= 0:
+        brake_cmd = 0
+      elif brake_cmd > 0.3:
+        brake_cmd = 1
+      
+      # Check brake pedal state when in autonomous mode
+      if not self.manual_control and brake_cmd > 0.5:
+        # Record intervention
+        self.data_recording['interventions'].append({
+          'time': current_time,
+          'step': self.step,
+          'reason': 'brake_press'
+        })
+        
+        # Update control time before switching modes
+        mode_duration = current_time - self.data_recording['last_mode_switch_time']
+        self.data_recording['control_time']['ai'] += mode_duration
+        self.data_recording['last_mode_switch_time'] = current_time
+        
+        self.manual_control = True
+        self.data_recording['current_mode'] = 'manual'
+        self.last_switch_time = current_time
+        print(f"BRAKE PRESS: Switching to MANUAL Control - Brake value: {brake_value}")
+      
+      if self.manual_control:
+        # Process inputs for manual control
+        K1 = 1.0  # 0.55
+        steer_cmd = K1 * math.tan(1.1 * jsInputs[self._steer_idx])
+        
+        K2 = 1.6  # 1.6
+        throttle_cmd = K2 + (2.05 * math.log10(
+          -0.7 * jsInputs[self._throttle_idx] + 1.4) - 1.2) / 0.92
+        if throttle_cmd <= 0:
+          throttle_cmd = 0
+        elif throttle_cmd > 1:
+          throttle_cmd = 1
+        
+        # Create manual control command
+        human_control = carla.VehicleControl(
+          steer=float(steer_cmd),
+          throttle=float(throttle_cmd), 
+          brake=float(brake_cmd))
+        
+        # Record human control command
+        if self.step % self.record_frequency == 0:
+          self.data_recording['control_commands']['human'].append({
+            'step': self.step,
+            'time': current_time,
+            'steer': steer_cmd,
+            'throttle': throttle_cmd,
+            'brake': brake_cmd
+          })
+        
+        # Update for UKF
+        if self.step < self.config.inital_frames_delay:
+          self.control = carla.VehicleControl(0.0, 0.0, 1.0)
+        else:
+          self.control = human_control
+        
+        # Get AI control for comparison (without applying it)
+        # ai_control = self.get_control(tick_data)
+        
+        # Record AI control command and differences
+        if self.step % self.record_frequency == 0:
+          self.data_recording['control_commands']['ai'].append({
+            'step': self.step,
+            'time': current_time,
+            'steer': ai_control.steer,
+            'throttle': ai_control.throttle,
+            'brake': ai_control.brake
+          })
+          
+          # Calculate and record steering difference
+          steering_diff = abs(ai_control.steer - steer_cmd)
+          self.data_recording['steering_differences'].append({
+            'step': self.step,
+            'difference': steering_diff
+          })
+          
+          # Calculate and record speed difference (using throttle-brake as proxy)
+          ai_speed = ai_control.throttle - ai_control.brake
+          human_speed = throttle_cmd - brake_cmd
+          speed_diff = abs(ai_speed - human_speed)
+          self.data_recording['speed_differences'].append({
+            'step': self.step,
+            'difference': speed_diff
+          })
+        
+        return human_control
+    
+    # If we're in autonomous mode or no joystick is available
+    # ai_control = self.get_control(tick_data)
+    
+    # Record AI control command
+    if self.step % self.record_frequency == 0:
+      self.data_recording['control_commands']['ai'].append({
+        'step': self.step,
+        'time': current_time,
+        'steer': ai_control.steer,
+        'throttle': ai_control.throttle,
+        'brake': ai_control.brake
+      })
+      
+      # Update control time
+      if not self.manual_control:
+        mode_duration = current_time - self.data_recording['last_mode_switch_time']
+        self.data_recording['control_time']['ai'] += mode_duration
+        self.data_recording['last_mode_switch_time'] = current_time
+    
+    # Save data periodically
+    # if self.step % 1000 == 0:
+    #   # self.save_recorded_data()
+    
+    self.control = ai_control
+
+
+
+    
     return control
 
   def stop_sign_controller_step(self, ego_speed):
@@ -800,6 +1715,14 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
     The leaderboard client doesn't properly clear up the agent after the route finishes so we need to do it here.
     Also writes logging files to disk.
     """
+    # Finalize unified risk manager (includes TTC plots)
+    if hasattr(self, 'unified_risk_manager'):
+        self.unified_risk_manager.shutdown()
+    
+    # Fallback for legacy safety evaluator
+    if hasattr(self, 'safety_evaluator'):
+        self.safety_evaluator.finalize_plots()
+        
     if self.save_path is not None:
       self.lon_logger.dump_to_json()
       if len(self.nets[0].speed_histogram) > 0:
@@ -814,9 +1737,100 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
 
         del self.tp_attention_buffer
 
+    # Save TTC data if logger exists
+    if hasattr(self, 'ttc_logger') and self.ttc_logger:
+        print("🔍 DEBUG: Saving TTC data...")
+        filepath = self.ttc_logger.save_data()
+        report = self.ttc_logger.generate_report()
+        print(report)
+        
+        # Save report to file
+        if filepath:
+            report_file = filepath.replace('.json', '_report.txt')
+            with open(report_file, 'w') as f:
+                f.write(report)
+            print(f"📋 TTC report saved: {report_file}")
+    else:
+        print("🔍 DEBUG: No TTC logger to save")
+
     del self.nets
     del self.config
     del self.metric_info
+
+
+
+  def draw_traffic_status(self, surface, signal_info, ego_speed):
+    """Draw traffic signal status and ego speed in top-right corner"""
+    
+    texts = []
+    
+    # === EGO SPEED ===
+    ego_speed_kmh = ego_speed * 3.6
+    speed_color = (255, 255, 255)
+    if ego_speed_kmh > 60:
+        speed_color = (255, 165, 0)  # Orange for high speed
+    elif ego_speed_kmh > 80:
+        speed_color = (255, 50, 50)  # Red for very high speed
+    
+    texts.append((f"Speed: {ego_speed_kmh:.1f} km/h", speed_color))
+    
+    # === TRAFFIC SIGNALS ===
+    if signal_info:
+        signal_type = signal_info.get('signal_type', 'Unknown')
+        distance = signal_info.get('distance', 0)
+        risk = signal_info.get('signal_risk', 0)
+        decel = signal_info.get('required_deceleration', 0)
+        
+        if signal_type == 'Red Light':
+            signal_color = (255, 50, 50)
+            icon = "🔴"
+        elif signal_type == 'Stop Sign':
+            signal_color = (255, 165, 0)
+            icon = "🛑"
+        else:
+            signal_color = (255, 255, 255)
+            icon = "⚠️"
+            
+        texts.append((f"{icon} {signal_type}", signal_color))
+        texts.append((f"{distance:.1f}m", signal_color))
+        
+        if decel > 7.0:
+            texts.append(("EMERGENCY BRAKE", (255, 0, 0)))
+        elif decel > 4.0:
+            texts.append(("HARD BRAKE", (255, 165, 0)))
+    else:
+        texts.append(("No Signals", (50, 255, 50)))
+    
+    # Render and position
+    rendered_texts = []
+    max_width = 0
+    total_height = 0
+    line_height = self._font_mono.get_height()
+    
+    for text, color in texts:
+        rendered = self._font_mono.render(text, True, color)
+        rendered_texts.append((rendered, color))
+        max_width = max(max_width, rendered.get_width())
+        total_height += line_height + 2
+    
+    # Position in top-right corner
+    pos_x = surface.get_width() - max_width - 30
+    pos_y = 30
+    
+    # Background
+    bg = pygame.Surface((max_width + 20, total_height + 20))
+    bg.fill((0, 0, 0))
+    bg.set_alpha(128)
+    surface.blit(bg, (pos_x - 10, pos_y - 10))
+    
+    # Draw text
+    current_y = pos_y
+    for rendered, color in rendered_texts:
+        surface.blit(rendered, (pos_x, current_y))
+        current_y += line_height + 2
+
+
+
 
 
 # Filter Functions
@@ -993,3 +2007,7 @@ class EgoModel:
     next_spds = np.array(next_spds)
 
     return next_locs, next_yaws, next_spds
+
+
+        
+
