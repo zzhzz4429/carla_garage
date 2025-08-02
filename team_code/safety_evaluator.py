@@ -457,8 +457,7 @@ class SafetyEvaluator:
             tuple: (ttc_risk, threat_object_info) where ttc_risk is the primary risk factor
         """
         if not bounding_boxes:
-            # Add data point even when no objects detected
-            self.ttc_plotter.add_data_point(0.0, None, self.current_time)
+            # **NOTE: TTCPlotter will be called from calculate_external_risk_unified**
             return 0.0, None
         
         # Object class mapping for better identification
@@ -510,7 +509,7 @@ class SafetyEvaluator:
             # No threats in lane
             self.prev_closest_distance = None
             self.gap_rate_smooth = 0.0
-            self.ttc_plotter.add_data_point(0.0, None, self.current_time)
+            # **NOTE: TTCPlotter will be called from calculate_external_risk_unified**
             print("  No threats detected in ego lane")
             return 0.0, None
         
@@ -647,8 +646,7 @@ class SafetyEvaluator:
         # 6. Update state for next frame
         self.prev_closest_distance = current_safe_distance
         
-        # Add data point to plotter (enhanced for simplified approach)
-        self.ttc_plotter.add_data_point(ttc_risk, threat_object, self.current_time, ego_speed=ego_speed)
+        # **NOTE: TTCPlotter is now called from calculate_external_risk_unified with complete data**
         
         print(f"  Final TTC Risk: {ttc_risk:.3f}")
         print(f"  Threat: {closest_threat['class_name']} at safe distance {current_safe_distance:.2f}m (raw: {current_raw_distance:.2f}m)")
@@ -704,7 +702,7 @@ class SafetyEvaluator:
         combined_risk = (primary_weight * enhanced_ttc_risk + secondary_weight * signal_risk)
         
         # **RETURN SEPARATED RISKS**
-        return combined_risk, {
+        risk_breakdown = {
             # **SEPARATED COMPONENTS** - UnifiedRiskManager can use these independently
             'ttc_risk': enhanced_ttc_risk,
             'signal_risk': signal_risk,
@@ -728,67 +726,54 @@ class SafetyEvaluator:
             'signal_alert_level': signal_object.get('alert_level', 'NONE') if signal_object else 'NONE'
         }
         
-    def update_plotter_with_unified_risk(self, combined_risk, risk_breakdown):
-        """
-        **UPDATED: Update TTC plotter with separated risk architecture and signal compliance data**
+        # **UPDATE PLOTTER with comprehensive data** - This captures ALL signal compliance data
+        self.update_plotter_with_unified_risk_data(ego_speed, risk_breakdown)
         
-        Args:
-            combined_risk: The combined external risk value
-            risk_breakdown: Dictionary containing separated risk breakdown details
+        return combined_risk, risk_breakdown
+        
+    def update_plotter_with_unified_risk_data(self, ego_speed, external_breakdown):
         """
-        if hasattr(self, 'ttc_plotter') and len(self.ttc_plotter.unified_risks) > 0:
-            # Update the last entry with unified risk data
-            self.ttc_plotter.unified_risks[-1] = combined_risk
+        **NEW: Update TTCPlotter with complete separated risk data including signal compliance**
+        
+        This method ensures the plotter captures all the rich data from our separated risk architecture.
+        """
+        if hasattr(self, 'ttc_plotter'):
+            # Get primary TTC threat
+            ttc_object = external_breakdown.get('primary_threat')
+            ttc_risk = external_breakdown.get('ttc_risk', 0.0)
             
-            # **SEPARATED RISK ARCHITECTURE** - Update separated risk components
-            if hasattr(self.ttc_plotter, 'ttc_risks'):
-                # Update separated risk arrays if they exist
-                if risk_breakdown.get('separation_mode', False):
-                    # Update with separated risk data
-                    self.ttc_plotter.ttc_risks[-1] = risk_breakdown.get('ttc_risk', 0.0)
-                    self.ttc_plotter.signal_risks[-1] = risk_breakdown.get('signal_risk', 0.0)
-                    self.ttc_plotter.fused_ttc_risks[-1] = risk_breakdown.get('fused_ttc_risk', risk_breakdown.get('ttc_risk', 0.0))
-                    
-                    # Update driver state information
-                    driver_state = risk_breakdown.get('driver_state', {}).get('current_state', 'unknown')
-                    self.ttc_plotter.driver_states[-1] = driver_state
+            # Get signal compliance data
+            signal_info = external_breakdown.get('signal_info')
             
-            # **SIGNAL COMPLIANCE DATA** - Update signal information
-            signal_info = risk_breakdown.get('signal_info')
-            if signal_info and hasattr(self.ttc_plotter, 'signal_alert_levels'):
-                # Update signal compliance data
-                self.ttc_plotter.signal_distances[-1] = signal_info.get('distance_to_stop_line', np.nan)
-                self.ttc_plotter.signal_types[-1] = signal_info.get('signal_type', 'none')
-                self.ttc_plotter.signal_alert_levels[-1] = signal_info.get('alert_level', 'SAFE')
-                self.ttc_plotter.current_decelerations[-1] = signal_info.get('required_deceleration', 0.0)
-                
-                # **VIOLATION TRACKING** - Record violations in plotter
-                if signal_info.get('alert_level') == 'VIOLATION':
-                    violation_entry = {
-                        'time': self.current_time,
-                        'signal_type': signal_info.get('signal_type', 'Unknown'),
-                        'distance': signal_info.get('distance_to_stop_line', -1.0),
-                        'ego_speed': risk_breakdown.get('ego_speed', 0.0),
-                        'ego_speed_kmh': risk_breakdown.get('ego_speed', 0.0) * 3.6
-                    }
-                    
-                    # Avoid duplicate violations
-                    if not hasattr(self.ttc_plotter, '_last_violation_time') or \
-                       self.current_time - getattr(self.ttc_plotter, '_last_violation_time', 0) > 1.0:
-                        self.ttc_plotter.violations.append(violation_entry)
-                        self.ttc_plotter.violation_times.append(self.current_time)
-                        self.ttc_plotter._last_violation_time = self.current_time
-                        print(f"📊 PLOTTER: Violation added at {self.current_time:.1f}s")
+            # Create comprehensive risk breakdown for plotter
+            plotter_risk_breakdown = {
+                'ttc_risk': external_breakdown.get('raw_ttc_risk', 0.0),  # Raw TTC risk
+                'signal_risk': external_breakdown.get('signal_risk', 0.0),
+                'fused_ttc_risk': external_breakdown.get('ttc_risk', 0.0),  # Enhanced TTC risk
+                'separation_mode': True,
+                'driver_state': {'current_state': 'unknown'},  # Will be updated by UnifiedRiskManager
+                'max_deceleration_so_far': getattr(self, 'max_deceleration', 0.0),
+                'ego_speed': ego_speed
+            }
             
-            # **LEGACY COMPATIBILITY** - Update TTC object data
-            primary_threat = risk_breakdown.get('primary_threat')
-            if primary_threat:
-                self.ttc_plotter.emergency_flags[-1] = primary_threat.get('is_emergency', False)
-                self.ttc_plotter.object_types[-1] = primary_threat.get('class_name', 'unknown')
+            # **COMPREHENSIVE PLOTTER CALL** - This is where all the rich data gets captured
+            self.ttc_plotter.add_data_point(
+                ttc_risk=ttc_risk,
+                ttc_object=ttc_object,
+                frame_time=self.current_time,
+                unified_risk=external_breakdown.get('combined_risk', 0.0),
+                signal_data=signal_info,  # **SIGNAL COMPLIANCE DATA** - distances, deceleration, etc.
+                ego_speed=ego_speed,
+                risk_breakdown=plotter_risk_breakdown  # **SEPARATED RISK DATA**
+            )
             
-            # **MAXIMUM DECELERATION TRACKING** - Update if available
-            if hasattr(self.ttc_plotter, 'max_deceleration_history'):
-                max_decel = risk_breakdown.get('max_deceleration_so_far', 0.0)
-                if max_decel > 0:
-                    self.ttc_plotter.max_deceleration_history[-1] = max_decel 
-
+            print(f"📊 PLOTTER: Updated with separated risks - TTC: {ttc_risk:.3f}, Signal: {external_breakdown.get('signal_risk', 0.0):.3f}")
+            
+            # Log signal compliance details if present
+            if signal_info:
+                signal_type = signal_info.get('signal_type', 'Unknown')
+                distance = signal_info.get('distance_to_stop_line', 0.0)
+                decel = signal_info.get('required_deceleration', 0.0)
+                alert_level = signal_info.get('alert_level', 'SAFE')
+                print(f"📊 PLOTTER: Signal data - {signal_type} at {distance:.1f}m, {decel:.1f}m/s² ({alert_level})")
+        
