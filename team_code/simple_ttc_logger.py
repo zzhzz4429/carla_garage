@@ -1040,14 +1040,16 @@ Violation Warnings: {len(self.violation_warnings)}
         if self.signal_violations:
             violation_summary = self.get_signal_violation_summary()
             report += f"""
-Violation Rate: {violation_summary['violation_rate']:.1%}
-Max Required Deceleration: {violation_summary['max_deceleration_required']:.1f} m/s²
-Average Violation Distance: {violation_summary['average_violation_distance']:.1f} m
+Red Light Violations: {violation_summary['red_light_violations']}
+Stop Sign Violations: {violation_summary['stop_sign_violations']}
+Max Speed at Violation: {violation_summary['max_speed_at_violation']:.1f} km/h
+Average Distance Past Stop Line: {violation_summary['average_violation_distance']:.1f} m
+Maximum Deceleration Required: {violation_summary['max_deceleration_required']:.1f} m/s²
 
 Violations by Signal Type:"""
             for signal_type, count in violation_summary['by_signal_type'].items():
                 report += f"\n  {signal_type}: {count}"
-                
+
             report += f"\n\nViolations by Severity:"
             for severity, count in violation_summary['by_severity'].items():
                 report += f"\n  {severity}: {count}"
@@ -1060,57 +1062,78 @@ Violations by Signal Type:"""
 
     def get_signal_violation_summary(self) -> Dict:
         """
-        Generate summary statistics for signal compliance violations
+        **UPDATED: Generate comprehensive red light scenario evaluation metrics**
         
         Returns:
-            Dictionary with violation statistics
+            Dictionary with meaningful red light evaluation statistics
         """
-        if not self.signal_events:
+        if not self.signal_violations:
             return {
-                'total_events': 0,
-                'violations': 0,
-                'violation_rate': 0.0,
+                'total_violations': 0,
+                'red_light_violations': 0,
+                'stop_sign_violations': 0,
                 'by_signal_type': {},
                 'by_severity': {},
                 'max_deceleration_required': 0.0,
-                'average_violation_distance': 0.0
+                'average_violation_distance': 0.0,
+                'near_violations': len(getattr(self, 'violation_warnings', [])),
+                'total_risk_events': len(getattr(self, 'violation_warnings', []))
             }
         
         # Count violations by type and severity
         violations_by_type = {}
         violations_by_severity = {}
-        max_decel = 0.0
+        max_decel_required = 0.0
         violation_distances = []
+        violation_speeds = []
         
         for violation in self.signal_violations:
             # Count by signal type
             signal_type = violation.get('signal_type', 'Unknown')
             violations_by_type[signal_type] = violations_by_type.get(signal_type, 0) + 1
             
-            # Count by severity
-            severity = violation.get('severity', 'Unknown')
+            # Count by severity (if available)
+            severity = violation.get('severity', 'VIOLATION')
             violations_by_severity[severity] = violations_by_severity.get(severity, 0) + 1
             
-            # Track max deceleration and distances
+            # Track maximum deceleration required
             decel = violation.get('required_deceleration', 0.0)
-            max_decel = max(max_decel, decel)
-            violation_distances.append(violation.get('distance', 0.0))
+            max_decel_required = max(max_decel_required, decel)
+            
+            # Track violation distances and speeds
+            violation_distances.append(violation.get('distance_past_stop_line', 0.0))
+            violation_speeds.append(violation.get('ego_speed_kmh_at_violation', 0.0))
         
-        # Calculate violation rate
+        # Calculate metrics
         total_violations = len(self.signal_violations)
-        violation_rate = total_violations / len(self.signal_events) if self.signal_events else 0.0
+        red_light_violations = violations_by_type.get('Red Light', 0)
+        stop_sign_violations = violations_by_type.get('Stop Sign', 0)
         
-        # Average violation distance
+        # Average violation distance and speed
         avg_violation_distance = sum(violation_distances) / len(violation_distances) if violation_distances else 0.0
+        avg_violation_speed = sum(violation_speeds) / len(violation_speeds) if violation_speeds else 0.0
         
         return {
-            'total_events': len(self.signal_events),
-            'violations': total_violations,
-            'violation_rate': violation_rate,
+            # **VIOLATION COUNTS**
+            'total_violations': total_violations,
+            'red_light_violations': red_light_violations,
+            'stop_sign_violations': stop_sign_violations,
             'by_signal_type': violations_by_type,
             'by_severity': violations_by_severity,
-            'max_deceleration_required': max_decel,
-            'average_violation_distance': avg_violation_distance
+            
+            # **VIOLATION CHARACTERISTICS**
+            'max_deceleration_required': max_decel_required,
+            'average_violation_distance': avg_violation_distance,
+            'average_violation_speed_kmh': avg_violation_speed,
+            
+            # **RISK ASSESSMENT**
+            'near_violations': len(getattr(self, 'violation_warnings', [])),
+            'total_risk_events': total_violations + len(getattr(self, 'violation_warnings', [])),
+            
+            # **SCENARIO EVALUATION METRICS**
+            'max_speed_at_violation': max(violation_speeds) if violation_speeds else 0.0,
+            'min_speed_at_violation': min(violation_speeds) if violation_speeds else 0.0,
+            'max_distance_past_stop_line': max(violation_distances) if violation_distances else 0.0
         } 
 
     def get_signal_compliance_metrics(self) -> Dict:
