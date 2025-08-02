@@ -511,7 +511,7 @@ class TTCPlotter:
             
     def save_data_json(self):
         """
-        Save TTC data as JSON for further analysis
+        **ENHANCED: Save comprehensive risk data including signal compliance**
         """
         data = {
             'session_id': self.session_id,
@@ -521,11 +521,41 @@ class TTCPlotter:
         
         for i in range(len(self.ttc_data)):
             data_point = {
+                # **BASIC TTC DATA**
                 'time': self.time_data[i],
                 'ttc_risk': self.ttc_data[i],
                 'object_id': self.object_ids[i],
                 'distance': self.distances[i],
-                'gap_rate': self.gap_rates[i]
+                'gap_rate': self.gap_rates[i],
+                'ego_speed': self.ego_speeds[i] if i < len(self.ego_speeds) else 0.0,
+                
+                # **SEPARATED RISK ARCHITECTURE**
+                'separated_risks': {
+                    'ttc_risk': self.ttc_risks[i] if i < len(self.ttc_risks) else self.ttc_data[i],
+                    'signal_risk': self.signal_risks[i] if i < len(self.signal_risks) else 0.0,
+                    'fused_ttc_risk': self.fused_ttc_risks[i] if i < len(self.fused_ttc_risks) else self.ttc_data[i],
+                    'unified_risk': self.unified_risks[i] if i < len(self.unified_risks) else self.ttc_data[i]
+                },
+                
+                # **SIGNAL COMPLIANCE DATA** - This is the missing data!
+                'signal_compliance': {
+                    'distance_to_signal': self.signal_distances[i] if i < len(self.signal_distances) else None,
+                    'signal_type': self.signal_types[i] if i < len(self.signal_types) else 'none',
+                    'alert_level': self.signal_alert_levels[i] if i < len(self.signal_alert_levels) else 'SAFE',
+                    'required_deceleration': self.current_decelerations[i] if i < len(self.current_decelerations) else 0.0
+                },
+                
+                # **ENHANCED OBJECT DATA**
+                'object_info': {
+                    'type': self.object_types[i] if i < len(self.object_types) else 'none',
+                    'is_emergency': self.emergency_flags[i] if i < len(self.emergency_flags) else False
+                },
+                
+                # **DRIVER STATE** (if available)
+                'driver_state': self.driver_states[i] if i < len(self.driver_states) else 'unknown',
+                
+                # **MAXIMUM DECELERATION TRACKING**
+                'max_deceleration_so_far': self.max_deceleration_history[i] if i < len(self.max_deceleration_history) else 0.0
             }
             data['data_points'].append(data_point)
             
@@ -536,6 +566,7 @@ class TTCPlotter:
             emergency_frames = [i for i, flag in enumerate(self.emergency_flags) if flag]
             
             data['summary'] = {
+                # **BASIC TTC STATISTICS**
                 'total_frames': len(self.ttc_data),
                 'max_ttc_risk': max(self.ttc_data),
                 'min_ttc_risk': min(self.ttc_data),
@@ -545,15 +576,43 @@ class TTCPlotter:
                 'warning_frames': sum(1 for risk in self.ttc_data if 0.5 <= risk < 0.8),
                 'caution_frames': sum(1 for risk in self.ttc_data if 0.2 <= risk < 0.5),
                 'safe_frames': sum(1 for risk in self.ttc_data if risk < 0.2),
-                # Enhanced statistics for simplified approach
+                
+                # **SEPARATED RISK STATISTICS**
+                'separated_risks': {
+                    'max_signal_risk': max(self.signal_risks) if self.signal_risks else 0.0,
+                    'avg_signal_risk': np.mean(self.signal_risks) if self.signal_risks else 0.0,
+                    'signal_events_detected': sum(1 for sr in self.signal_risks if sr > 0.01),
+                    'max_unified_risk': max(self.unified_risks) if self.unified_risks else 0,
+                    'avg_unified_risk': np.mean(self.unified_risks) if self.unified_risks else 0,
+                },
+                
+                # **SIGNAL COMPLIANCE STATISTICS** - NEW comprehensive data
+                'signal_compliance': {
+                    'total_signal_encounters': sum(1 for st in self.signal_types if st != 'none'),
+                    'red_light_encounters': sum(1 for st in self.signal_types if st == 'Red Light'),
+                    'stop_sign_encounters': sum(1 for st in self.signal_types if st == 'Stop Sign'),
+                    'violations_detected': len(self.violations),
+                    'violation_details': self.violations,  # Complete violation data
+                    'max_required_deceleration': max(self.current_decelerations) if self.current_decelerations else 0.0,
+                    'avg_signal_distance': np.mean([d for d in self.signal_distances if not np.isnan(d)]) if self.signal_distances else 0.0,
+                    'alert_level_distribution': {
+                        level: self.signal_alert_levels.count(level)
+                        for level in set(self.signal_alert_levels) if level != 'SAFE'
+                    }
+                },
+                
+                # **EMERGENCY VEHICLE STATISTICS** 
                 'emergency_encounters': emergency_encounters,
                 'emergency_percentage': (emergency_encounters / len(self.ttc_data)) * 100,
-                'max_unified_risk': max(self.unified_risks) if self.unified_risks else 0,
-                'avg_unified_risk': np.mean(self.unified_risks) if self.unified_risks else 0,
+                
+                # **OBJECT TYPE DISTRIBUTION**
                 'object_type_distribution': {
                     obj_type: self.object_types.count(obj_type) 
                     for obj_type in set(self.object_types) if obj_type != 'none'
-                }
+                },
+                
+                # **PERFORMANCE METRICS**
+                'max_deceleration_achieved': max(self.max_deceleration_history) if self.max_deceleration_history else 0.0
             }
         
         # Save JSON file
