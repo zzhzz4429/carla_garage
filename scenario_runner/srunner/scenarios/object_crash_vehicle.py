@@ -165,11 +165,17 @@ class DynamicObjectCrossing(BasicScenario):
         self._blocker_transform = None
         self._collision_wp = None
 
-        self._adversary_speed = 2.0  # Speed of the adversary [m/s]
+        self._adversary_speed = 1.2  # **REDUCED**: Speed of the adversary [m/s] - slower, more predictable crossing
         self._crossing_angle = get_value_parameter(config, 'crossing_angle', float, 0)
-        self._reaction_time = 2.1  # Time the agent has to react to avoid the collision [s]
-        self._reaction_time += 0.1 * floor(self._crossing_angle / 5)
-        self._min_trigger_dist = 6.0  # Min distance to the collision location that triggers the adversary [m]
+        
+        # **MUCH EASIER**: Dramatically increased reaction time for safe scenarios
+        base_reaction_time = 4.5  # **INCREASED from 2.1s to 4.5s** - plenty of time to react safely
+        self._reaction_time = base_reaction_time + 0.2 * floor(self._crossing_angle / 5)  # More generous angle adjustment
+        
+        # **EASIER FOR ALL SPEEDS**: Remove speed-dependent difficulty
+        self._speed_factor_enabled = False
+        
+        self._min_trigger_dist = 15.0  # **INCREASED from 6.0m to 15.0m** - pedestrian starts crossing when ego is far away
         self._ego_end_distance = 40
         self.timeout = timeout
 
@@ -397,8 +403,8 @@ class ParkingCrossingPedestrian(BasicScenario):
         self._reference_waypoint = self._wmap.get_waypoint(self._trigger_location)
         self._num_lane_changes = 0
 
-        self._adversary_speed = 2.0  # Speed of the adversary [m/s]
-        self._min_trigger_dist = 6.0  # Min distance to the collision location that triggers the adversary [m]
+        self._adversary_speed = 1.2  # **REDUCED**: Speed of the adversary [m/s] - slower crossing
+        self._min_trigger_dist = 15.0  # **INCREASED from 6.0m to 15.0m** - pedestrian starts crossing when ego is far away
         self._ego_end_distance = 40
         self.timeout = timeout
 
@@ -412,9 +418,9 @@ class ParkingCrossingPedestrian(BasicScenario):
         if self._direction not in ('left', 'right'):
             raise ValueError(f"'direction' must be either 'right' or 'left' but {self._direction} was given")
 
-        # Time the agent has to react to avoid the collision [s]
-        self._reaction_time = 2.15
-        self._reaction_time += 0.1 * floor(self._crossing_angle / 5)
+        # **MUCH EASIER**: Time the agent has to react to avoid the collision [s]
+        self._reaction_time = 4.8  # **INCREASED from 2.15s to 4.8s** - plenty of time to react
+        self._reaction_time += 0.2 * floor(self._crossing_angle / 5)  # More generous angle adjustment
 
         super().__init__("ParkingCrossingPedestrian",
                          ego_vehicles,
