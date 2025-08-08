@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 class ExperimentLogAnalyzer:
-    def __init__(self, log_directory: str = "/home/ascc304/carla_garage/experiment_logs/zhaohua/pedestrian/pd_ev"):
+    def __init__(self, log_directory: str = "/home/ascc304/carla_garage/experiment_logs/P002/PED"):
         self.log_directory = log_directory
         self.data = []
         self.summary_stats = {}

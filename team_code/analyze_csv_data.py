@@ -14,7 +14,7 @@ import os
 import glob
 
 class ExperimentCSVAnalyzer:
-    def __init__(self, csv_file: str = None, log_directory: str = "/home/ascc304/carla_garage/experiment_logs/zhaohua/pedestrian/pd_ev"):
+    def __init__(self, csv_file: str = None, log_directory: str = "/home/ascc304/carla_garage/experiment_logs/P002/EV"):
         """Initialize analyzer with CSV file"""
         self.log_directory = log_directory
         

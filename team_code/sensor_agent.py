@@ -1523,7 +1523,7 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
       brake_cmd = 1.6 + (2.05 * math.log10(-0.7 * jsInputs[self._brake_idx] + 1.4) - 1.2) / 0.92
       if brake_cmd <= 0:
         brake_cmd = 0
-      elif brake_cmd > 0.3:
+      elif brake_cmd > 0:
         brake_cmd = 1
       
       # Check brake pedal state when in autonomous mode

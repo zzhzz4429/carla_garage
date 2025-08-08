@@ -63,7 +63,7 @@ class SimpleTTCLogger:
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Set absolute path for experiment logs
-        self.log_directory = "/home/ascc304/carla_garage/experiment_logs/zhaohua/pedestrian"
+        self.log_directory = "/home/ascc304/carla_garage/experiment_logs/int_test"
         
         print(f"📊 Simple TTC Logger initialized")
         print(f"   Condition: {experiment_condition}")
