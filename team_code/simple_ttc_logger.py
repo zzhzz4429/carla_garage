@@ -489,8 +489,9 @@ class SimpleTTCLogger:
             return
         
         # Define when vehicle is considered "stopped"
-        STOP_SPEED_THRESHOLD = 1.0  # m/s (3.6 km/h) - INCREASED from 0.5 for more realistic detection
-        STOP_CONFIRMATION_TIME = 2.0  # seconds - require stopping for 2 seconds to confirm
+        STOP_SPEED_THRESHOLD = 2.0  # m/s (7.2 km/h) - More forgiving threshold
+        STOP_CONFIRMATION_TIME = 1.0  # seconds - Reduced confirmation time
+        AUTO_COMPLETE_TIME = 30.0  # seconds - Auto-complete after 30 seconds instead of 60
         
         violations_to_complete = []
         
@@ -541,9 +542,17 @@ class SimpleTTCLogger:
                 if tracking_data['stop_confirmation_start'] is not None:
                     tracking_data['stop_confirmation_start'] = None
             
-            # Auto-complete tracking after reasonable time limit (60 seconds) or if speed very low
-            if time_elapsed > 60.0 or (time_elapsed > 10.0 and ego_speed < 1.0):
+            # **IMPROVED: More forgiving auto-complete conditions**
+            should_auto_complete = (
+                time_elapsed > AUTO_COMPLETE_TIME or  # 30 seconds elapsed
+                (time_elapsed > 10.0 and ego_speed < STOP_SPEED_THRESHOLD) or  # 10+ seconds and slow
+                (time_elapsed > 15.0 and ego_speed < 5.0)  # 15+ seconds and very slow
+            )
+            
+            if should_auto_complete and violation_id not in violations_to_complete:
+                # Set final metrics for auto-completion
                 tracking_data['time_to_stop'] = time_elapsed if ego_speed <= STOP_SPEED_THRESHOLD else None
+                tracking_data['has_stopped'] = ego_speed <= STOP_SPEED_THRESHOLD
                 violations_to_complete.append(violation_id)
         
         # Complete tracking for stopped violations
