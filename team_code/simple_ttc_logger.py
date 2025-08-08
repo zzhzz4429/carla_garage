@@ -478,7 +478,8 @@ class SimpleTTCLogger:
             return
         
         # Define when vehicle is considered "stopped"
-        STOP_SPEED_THRESHOLD = 0.5  # m/s (1.8 km/h)
+        STOP_SPEED_THRESHOLD = 1.0  # m/s (3.6 km/h) - INCREASED from 0.5 for more realistic detection
+        STOP_CONFIRMATION_TIME = 2.0  # seconds - require stopping for 2 seconds to confirm
         
         violations_to_complete = []
         
@@ -489,6 +490,11 @@ class SimpleTTCLogger:
             # Calculate time elapsed since violation
             time_elapsed = timestamp - tracking_data['start_timestamp']
             
+            # **IMPROVED: Initialize stop confirmation tracking**
+            if 'stop_confirmation_start' not in tracking_data:
+                tracking_data['stop_confirmation_start'] = None
+                tracking_data['confirmed_stopped'] = False
+            
             # Estimate distance traveled (simple integration using previous speed)
             if tracking_data['last_update_timestamp'] is not None:
                 dt = timestamp - tracking_data['last_update_timestamp']
@@ -496,26 +502,51 @@ class SimpleTTCLogger:
                 avg_speed = (tracking_data['last_speed'] + ego_speed) / 2.0
                 distance_increment = avg_speed * dt
                 tracking_data['distance_traveled_after_violation'] += distance_increment
+                
+                # **DEBUG: Print distance calculation details**
+                if distance_increment > 0.1:  # Only print significant increments
+                    print(f"🏁 {violation_id}: dt={dt:.3f}s, avg_speed={avg_speed*3.6:.1f}km/h, +{distance_increment:.2f}m, total={tracking_data['distance_traveled_after_violation']:.1f}m")
             
             # Update tracking state
             tracking_data['last_update_timestamp'] = timestamp
             tracking_data['last_speed'] = ego_speed
             
-            # Check if vehicle has stopped
-            if ego_speed <= STOP_SPEED_THRESHOLD and not tracking_data['has_stopped']:
-                tracking_data['has_stopped'] = True
-                tracking_data['stop_timestamp'] = timestamp
-                tracking_data['time_to_stop'] = time_elapsed
-                
-                print(f"🛑 VEHICLE STOPPED after violation {violation_id}")
-                print(f"   Time to stop: {tracking_data['time_to_stop']:.2f} seconds")
-                print(f"   Distance traveled: {tracking_data['distance_traveled_after_violation']:.1f} meters")
-                
-                # Mark for completion
-                violations_to_complete.append(violation_id)
+            # **DEBUG: Print tracking status every second**
+            if int(time_elapsed) != int(time_elapsed - 0.1):  # Every integer second
+                print(f"📊 POST-VIOLATION {violation_id}: t={time_elapsed:.1f}s, speed={ego_speed*3.6:.1f}km/h, distance={tracking_data['distance_traveled_after_violation']:.1f}m")
+            
+            # **IMPROVED: Check if vehicle has stopped with confirmation**
+            if ego_speed <= STOP_SPEED_THRESHOLD:
+                # Vehicle is currently below stop threshold
+                if tracking_data['stop_confirmation_start'] is None:
+                    # Start stop confirmation timer
+                    tracking_data['stop_confirmation_start'] = timestamp
+                    print(f"🚦 {violation_id}: Starting stop confirmation at {ego_speed*3.6:.1f} km/h")
+                else:
+                    # Check if vehicle has been stopped long enough
+                    stop_duration = timestamp - tracking_data['stop_confirmation_start']
+                    if stop_duration >= STOP_CONFIRMATION_TIME and not tracking_data['confirmed_stopped']:
+                        # Vehicle confirmed stopped
+                        tracking_data['confirmed_stopped'] = True
+                        tracking_data['has_stopped'] = True
+                        tracking_data['stop_timestamp'] = tracking_data['stop_confirmation_start']
+                        tracking_data['time_to_stop'] = tracking_data['stop_confirmation_start'] - tracking_data['start_timestamp']
+                        
+                        print(f"🛑 VEHICLE CONFIRMED STOPPED after violation {violation_id}")
+                        print(f"   Time to stop: {tracking_data['time_to_stop']:.2f} seconds")
+                        print(f"   Distance traveled: {tracking_data['distance_traveled_after_violation']:.1f} meters")
+                        print(f"   Stop confirmation took: {stop_duration:.1f} seconds")
+                        
+                        # Mark for completion
+                        violations_to_complete.append(violation_id)
+            else:
+                # Vehicle speed above threshold - reset stop confirmation
+                if tracking_data['stop_confirmation_start'] is not None:
+                    print(f"🏃 {violation_id}: Stop confirmation reset - speed back to {ego_speed*3.6:.1f} km/h")
+                    tracking_data['stop_confirmation_start'] = None
             
             # Auto-complete tracking after reasonable time limit (60 seconds) or if speed very low
-            elif time_elapsed > 60.0 or (time_elapsed > 10.0 and ego_speed < 1.0):
+            if time_elapsed > 60.0 or (time_elapsed > 10.0 and ego_speed < 1.0):
                 tracking_data['time_to_stop'] = time_elapsed if ego_speed <= STOP_SPEED_THRESHOLD else None
                 violations_to_complete.append(violation_id)
                 
