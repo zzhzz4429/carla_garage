@@ -390,6 +390,23 @@ class SimpleTTCLogger:
             print(f"🚨 SIMPLE_TTC_LOGGER: Processing VIOLATION for {signal_type}")
             print(f"📊 Current violation count before: {len(self.signal_violations)}")
             
+            # **DUPLICATE PREVENTION**: Check if we already logged this violation recently
+            current_time = timestamp
+            recent_threshold = 5.0  # seconds - don't log same type within 5 seconds
+            
+            # Check for recent violation of same type
+            recent_violation = False
+            for existing_violation in self.signal_violations:
+                time_diff = abs(current_time - existing_violation['timestamp'])
+                same_type = existing_violation['signal_type'] == signal_type
+                if same_type and time_diff < recent_threshold:
+                    print(f"🚫 DUPLICATE VIOLATION PREVENTED: {signal_type} already logged {time_diff:.1f}s ago")
+                    recent_violation = True
+                    break
+            
+            if recent_violation:
+                return  # Skip logging this violation
+            
             # **FIXED: Use speed from signal_info for violations, not current ego_speed**
             violation_speed_ms = signal_info.get('ego_speed_at_violation', ego_speed)
             
