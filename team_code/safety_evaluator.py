@@ -152,6 +152,9 @@ class SafetyEvaluator:
             
             # Update tracking data (only if not recently violated)
             if not recently_violated:
+                prev_max_speed = getattr(self._tracked_signals.get(signal_id, {}), 'max_ego_speed', 0.0)
+                new_max_speed = max(prev_max_speed, ego_speed)
+                
                 self._tracked_signals[signal_id] = {
                     'distance': d_to_stop_line,
                     'signal_type': signal_type,
@@ -159,9 +162,13 @@ class SafetyEvaluator:
                     'position': (bb[0], bb[1]),
                     'approaching': d_to_stop_line > 0 and d_to_stop_line < 50.0,  # Within 50m range
                     'ego_speed': ego_speed,
-                    'max_ego_speed': max(getattr(self._tracked_signals.get(signal_id, {}), 'max_ego_speed', 0.0), ego_speed),  # **NEW: Track max speed**
+                    'max_ego_speed': new_max_speed,  # **NEW: Track max speed**
                     'min_distance_seen': min(getattr(self._tracked_signals.get(signal_id, {}), 'min_distance_seen', float('inf')), d_to_stop_line)
                 }
+                
+                # **DEBUG: Print when new max speed is detected**
+                if new_max_speed > prev_max_speed and ego_speed > 5.0:  # > 18 km/h
+                    print(f"🏃 NEW MAX SPEED for {signal_type}: {new_max_speed*3.6:.1f} km/h at {d_to_stop_line:.1f}m distance")
             
             self._violation_debug_count += 1
             
