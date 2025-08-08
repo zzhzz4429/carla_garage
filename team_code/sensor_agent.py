@@ -1773,15 +1773,23 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
     if hasattr(self, 'ttc_logger') and self.ttc_logger:
         print("🔍 DEBUG: Saving TTC data...")
         filepath = self.ttc_logger.save_data()
+        print(f"🔍 DEBUG: save_data returned filepath: {filepath}")
+        
         report = self.ttc_logger.generate_report()
         print(report)
         
         # Save report to file
         if filepath:
             report_file = filepath.replace('.json', '_report.txt')
-            with open(report_file, 'w') as f:
-                f.write(report)
-            print(f"📋 TTC report saved: {report_file}")
+            print(f"🔍 DEBUG: Attempting to save report to: {report_file}")
+            try:
+                with open(report_file, 'w') as f:
+                    f.write(report)
+                print(f"📋 TTC report saved: {report_file}")
+            except Exception as e:
+                print(f"❌ ERROR saving report: {e}")
+        else:
+            print("❌ ERROR: filepath is None or empty, cannot save report")
     else:
         print("🔍 DEBUG: No TTC logger to save")
 
