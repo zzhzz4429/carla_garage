@@ -159,6 +159,7 @@ class SafetyEvaluator:
                     'position': (bb[0], bb[1]),
                     'approaching': d_to_stop_line > 0 and d_to_stop_line < 50.0,  # Within 50m range
                     'ego_speed': ego_speed,
+                    'max_ego_speed': max(getattr(self._tracked_signals.get(signal_id, {}), 'max_ego_speed', 0.0), ego_speed),  # **NEW: Track max speed**
                     'min_distance_seen': min(getattr(self._tracked_signals.get(signal_id, {}), 'min_distance_seen', float('inf')), d_to_stop_line)
                 }
             
@@ -306,7 +307,7 @@ class SafetyEvaluator:
                         index=0,  # No current bounding box index
                         signal_type=signal_type,
                         distance=-1.0,  # Estimated as past stop line
-                        ego_speed=ego_speed,
+                        ego_speed=signal_data['max_ego_speed'],  # **FIXED: Use max speed while approaching signal**
                         cautious_threshold=4.0,
                         warning_threshold=6.0,
                         critical_threshold=8.0,
@@ -314,6 +315,9 @@ class SafetyEvaluator:
                     )
                     
                     print(f"🚨 VIOLATION DETECTED: {signal_type} disappeared after approaching to {last_distance:.1f}m")
+                    print(f"   Max speed while approaching: {signal_data['max_ego_speed']*3.6:.1f} km/h")
+                    print(f"   Current speed at detection: {ego_speed*3.6:.1f} km/h")
+                    print(f"   Speed difference: {(signal_data['max_ego_speed'] - ego_speed)*3.6:.1f} km/h")
                     
                     # Remove this signal from tracking
                     signals_to_remove.append(signal_id)
