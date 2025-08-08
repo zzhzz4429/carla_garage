@@ -52,6 +52,11 @@ class SimpleTTCLogger:
             'stop_sign_encounters': 0
         }
         
+        # **NEW: Post-violation tracking metrics**
+        self.active_post_violations = {}     # Currently tracking violations {violation_id: tracking_data}
+        self.completed_post_violations = []  # Completed post-violation analyses
+        self._violation_counter = 0          # Counter for unique violation IDs
+        
         # Experiment tracking
         self.hazard_first_detected = None  # NEW: When police car first detected
         self.first_alert_issued = None     # NEW: When first alert was issued
@@ -89,6 +94,9 @@ class SimpleTTCLogger:
         
         # **NEW: Track speed and calculate deceleration**
         self._track_speed_and_deceleration(timestamp, ego_speed)
+        
+        # **NEW: Update post-violation tracking metrics**
+        self.update_post_violation_tracking(timestamp, ego_speed)
         
         # Debug: Count all calls
         if not hasattr(self, '_call_count'):
@@ -382,19 +390,26 @@ class SimpleTTCLogger:
             print(f"🚨 SIMPLE_TTC_LOGGER: Processing VIOLATION for {signal_type}")
             print(f"📊 Current violation count before: {len(self.signal_violations)}")
             
+            # **FIXED: Use speed from signal_info for violations, not current ego_speed**
+            violation_speed_ms = signal_info.get('ego_speed_at_violation', ego_speed)
+            
             violation_entry = {
                 'timestamp': timestamp,
                 'relative_time': timestamp - self.start_time,
                 'signal_type': signal_type,
                 'distance_past_stop_line': abs(distance),  # How far past stop line
-                'ego_speed_at_violation': ego_speed,
-                'ego_speed_kmh_at_violation': ego_speed * 3.6,
+                'ego_speed_at_violation': violation_speed_ms,
+                'ego_speed_kmh_at_violation': violation_speed_ms * 3.6,
                 'violation_type': 'RAN_SIGNAL'
             }
             
             self.signal_violations.append(violation_entry)
-            print(f"📊 VIOLATION LOGGED: {signal_type} - {abs(distance):.1f}m past stop line at {ego_speed*3.6:.1f} km/h")
+            print(f"📊 VIOLATION LOGGED: {signal_type} - {abs(distance):.1f}m past stop line at {violation_speed_ms*3.6:.1f} km/h")
+            print(f"📊 Current ego speed: {ego_speed*3.6:.1f} km/h, Violation speed: {violation_speed_ms*3.6:.1f} km/h")
             print(f"📊 Total violations after logging: {len(self.signal_violations)}")
+            
+            # **NEW: Start post-violation tracking for time-to-stop and distance metrics**
+            self.start_post_violation_tracking(timestamp, signal_info, violation_speed_ms)
         
         # Print significant signal events
         if alert_level in ['CRITICAL', 'EMERGENCY', 'VIOLATION']:
@@ -403,6 +418,159 @@ class SimpleTTCLogger:
                 print(f"   Required: {required_decel:.1f} m/s², Max achieved: {self.max_deceleration:.1f} m/s²")
                 if signal_entry['deceleration_deficit'] > 0:
                     print(f"   ⚠️ Deficit: {signal_entry['deceleration_deficit']:.1f} m/s²")
+        
+    def start_post_violation_tracking(self, timestamp: float, violation_info: Dict, ego_speed: float):
+        """
+        **NEW: Start tracking post-violation metrics when a signal violation occurs**
+        
+        Args:
+            timestamp: When the violation occurred
+            violation_info: Information about the violation
+            ego_speed: Vehicle speed at violation (m/s)
+        """
+        self._violation_counter += 1
+        violation_id = f"violation_{self._violation_counter:03d}"
+        
+        # Initialize post-violation tracking data
+        tracking_data = {
+            'violation_id': violation_id,
+            'start_timestamp': timestamp,
+            'start_relative_time': timestamp - self.start_time,
+            'signal_type': violation_info.get('signal_type', 'Unknown'),
+            'violation_speed_ms': ego_speed,
+            'violation_speed_kmh': ego_speed * 3.6,
+            'distance_past_stop_line': abs(violation_info.get('distance_to_stop_line', 0.0)),
+            
+            # Tracking state
+            'is_active': True,
+            'has_stopped': False,
+            'stop_timestamp': None,
+            'last_update_timestamp': timestamp,
+            'last_speed': ego_speed,
+            
+            # Distance tracking  
+            'violation_position': None,  # Will be calculated from first post-violation position
+            'current_position': None,
+            'distance_traveled_after_violation': 0.0,
+            
+            # Time tracking
+            'time_to_stop': None,  # Will be calculated when vehicle stops
+        }
+        
+        self.active_post_violations[violation_id] = tracking_data
+        
+        print(f"🚨 POST-VIOLATION TRACKING STARTED: {violation_id}")
+        print(f"   Signal: {tracking_data['signal_type']}")
+        print(f"   Speed at violation: {ego_speed*3.6:.1f} km/h")
+        print(f"   Distance past stop line: {tracking_data['distance_past_stop_line']:.1f}m")
+        
+        return violation_id
+    
+    def update_post_violation_tracking(self, timestamp: float, ego_speed: float):
+        """
+        **NEW: Update all active post-violation tracking metrics**
+        
+        Args:
+            timestamp: Current timestamp
+            ego_speed: Current vehicle speed (m/s)
+        """
+        if not self.active_post_violations:
+            return
+        
+        # Define when vehicle is considered "stopped"
+        STOP_SPEED_THRESHOLD = 0.5  # m/s (1.8 km/h)
+        
+        violations_to_complete = []
+        
+        for violation_id, tracking_data in self.active_post_violations.items():
+            if not tracking_data['is_active']:
+                continue
+                
+            # Calculate time elapsed since violation
+            time_elapsed = timestamp - tracking_data['start_timestamp']
+            
+            # Estimate distance traveled (simple integration using previous speed)
+            if tracking_data['last_update_timestamp'] is not None:
+                dt = timestamp - tracking_data['last_update_timestamp']
+                # Use average speed over the interval for more accurate distance calculation
+                avg_speed = (tracking_data['last_speed'] + ego_speed) / 2.0
+                distance_increment = avg_speed * dt
+                tracking_data['distance_traveled_after_violation'] += distance_increment
+            
+            # Update tracking state
+            tracking_data['last_update_timestamp'] = timestamp
+            tracking_data['last_speed'] = ego_speed
+            
+            # Check if vehicle has stopped
+            if ego_speed <= STOP_SPEED_THRESHOLD and not tracking_data['has_stopped']:
+                tracking_data['has_stopped'] = True
+                tracking_data['stop_timestamp'] = timestamp
+                tracking_data['time_to_stop'] = time_elapsed
+                
+                print(f"🛑 VEHICLE STOPPED after violation {violation_id}")
+                print(f"   Time to stop: {tracking_data['time_to_stop']:.2f} seconds")
+                print(f"   Distance traveled: {tracking_data['distance_traveled_after_violation']:.1f} meters")
+                
+                # Mark for completion
+                violations_to_complete.append(violation_id)
+            
+            # Auto-complete tracking after reasonable time limit (60 seconds) or if speed very low
+            elif time_elapsed > 60.0 or (time_elapsed > 10.0 and ego_speed < 1.0):
+                tracking_data['time_to_stop'] = time_elapsed if ego_speed <= STOP_SPEED_THRESHOLD else None
+                violations_to_complete.append(violation_id)
+                
+                print(f"⏰ POST-VIOLATION TRACKING TIMEOUT for {violation_id}")
+                print(f"   Final time: {time_elapsed:.1f}s, Final speed: {ego_speed*3.6:.1f} km/h")
+                print(f"   Distance traveled: {tracking_data['distance_traveled_after_violation']:.1f}m")
+        
+        # Complete tracking for stopped violations
+        for violation_id in violations_to_complete:
+            self._complete_post_violation_tracking(violation_id)
+    
+    def _complete_post_violation_tracking(self, violation_id: str):
+        """
+        **NEW: Complete post-violation tracking and move to completed list**
+        
+        Args:
+            violation_id: ID of the violation to complete
+        """
+        if violation_id not in self.active_post_violations:
+            return
+        
+        tracking_data = self.active_post_violations[violation_id]
+        tracking_data['is_active'] = False
+        
+        # Create completed violation analysis
+        completed_analysis = {
+            'violation_id': violation_id,
+            'signal_type': tracking_data['signal_type'],
+            'violation_timestamp': tracking_data['start_timestamp'],
+            'violation_relative_time': tracking_data['start_relative_time'],
+            'violation_speed_kmh': tracking_data['violation_speed_kmh'],
+            'distance_past_stop_line': tracking_data['distance_past_stop_line'],
+            
+            # **PRIMARY METRICS REQUESTED**
+            'time_to_stop_seconds': tracking_data.get('time_to_stop'),
+            'distance_traveled_after_violation_meters': tracking_data['distance_traveled_after_violation'],
+            
+            # Analysis flags
+            'vehicle_stopped': tracking_data['has_stopped'],
+            'tracking_completed': True,
+            'tracking_duration': tracking_data['last_update_timestamp'] - tracking_data['start_timestamp']
+        }
+        
+        self.completed_post_violations.append(completed_analysis)
+        
+        # Remove from active tracking
+        del self.active_post_violations[violation_id]
+        
+        print(f"✅ POST-VIOLATION ANALYSIS COMPLETED: {violation_id}")
+        if completed_analysis['vehicle_stopped']:
+            print(f"   Time to stop: {completed_analysis['time_to_stop_seconds']:.2f}s")
+            print(f"   Distance after violation: {completed_analysis['distance_traveled_after_violation_meters']:.1f}m")
+        else:
+            print(f"   Vehicle did not stop during tracking period")
+            print(f"   Distance traveled: {completed_analysis['distance_traveled_after_violation_meters']:.1f}m")
         
     def get_alert_lead_time(self) -> Optional[float]:
         """
@@ -936,7 +1104,15 @@ class SimpleTTCLogger:
                 'total_violations': len(self.signal_violations),
                 'violation_warnings': len(self.violation_warnings) if hasattr(self, 'violation_warnings') else 0,
                 'signal_violations': self.signal_violations,
-                'violation_summary': self.get_signal_violation_summary() if hasattr(self, 'get_signal_violation_summary') else {}
+                'violation_summary': self.get_signal_violation_summary() if hasattr(self, 'get_signal_violation_summary') else {},
+                
+                # **NEW: Post-violation time and distance metrics**
+                'post_violation_metrics': {
+                    'active_tracking_count': len(self.active_post_violations),
+                    'completed_violations': len(self.completed_post_violations),
+                    'completed_post_violation_analyses': self.completed_post_violations,
+                    'post_violation_summary': self._get_post_violation_summary()
+                }
             }
         }
         
@@ -1034,6 +1210,26 @@ Effectiveness Analysis: {alert_effectiveness.get('analysis', 'N/A')}
 Total Signal Events: {len(self.signal_events)}
 Signal Violations: {len(self.signal_violations)}
 Violation Warnings: {len(self.violation_warnings)}
+
+=== POST-VIOLATION TIME & DISTANCE METRICS ==="""
+        
+        # Add post-violation metrics to report
+        post_violation_summary = self._get_post_violation_summary()
+        
+        report += f"""
+Completed Post-Violation Analyses: {post_violation_summary['total_completed_analyses']}
+Vehicles That Stopped After Violation: {post_violation_summary['vehicles_that_stopped']}
+Stop Rate: {post_violation_summary['stop_rate']:.2f}
+
+Time to Stop Metrics (for vehicles that stopped):
+  Average Time to Stop: {f"{post_violation_summary['avg_time_to_stop']:.2f}s" if post_violation_summary['avg_time_to_stop'] else "N/A"}
+  Range: {f"{post_violation_summary['min_time_to_stop']:.2f}s - {post_violation_summary['max_time_to_stop']:.2f}s" if post_violation_summary['min_time_to_stop'] else "N/A"}
+
+Distance Traveled After Violation:
+  Average Distance: {post_violation_summary['avg_distance_after_violation']:.1f}m
+  Range: {post_violation_summary['min_distance_after_violation']:.1f}m - {post_violation_summary['max_distance_after_violation']:.1f}m
+
+Active Tracking: {len(self.active_post_violations)} violations currently being tracked
 """
         
         # Add signal violation details if any exist
@@ -1236,3 +1432,79 @@ Violations by Signal Type:"""
         
         # Ratio of available deceleration to total required
         return min(1.0, (self.max_deceleration * len(self.signal_events)) / total_required) 
+    
+    def _get_post_violation_summary(self) -> Dict:
+        """
+        **NEW: Get summary of post-violation time and distance metrics**
+        
+        Returns:
+            Dictionary with post-violation analysis summary
+        """
+        if not self.completed_post_violations:
+            return {
+                'total_completed_analyses': 0,
+                'vehicles_that_stopped': 0,
+                'stop_rate': 0.0,  # **FIXED: Add missing stop_rate field**
+                'avg_time_to_stop': None,
+                'avg_distance_after_violation': 0.0,  # **FIXED: Use 0.0 instead of None**
+                'max_distance_after_violation': 0.0,  # **FIXED: Add missing field**
+                'min_distance_after_violation': 0.0,  # **FIXED: Add missing field**
+                'min_time_to_stop': None,
+                'max_time_to_stop': None
+            }
+        
+        # Extract metrics from completed violations
+        stopped_violations = [v for v in self.completed_post_violations if v['vehicle_stopped']]
+        times_to_stop = [v['time_to_stop_seconds'] for v in stopped_violations if v['time_to_stop_seconds'] is not None]
+        distances_traveled = [v['distance_traveled_after_violation_meters'] for v in self.completed_post_violations]
+        
+        return {
+            'total_completed_analyses': len(self.completed_post_violations),
+            'vehicles_that_stopped': len(stopped_violations),
+            'stop_rate': len(stopped_violations) / len(self.completed_post_violations) if self.completed_post_violations else 0.0,
+            
+            # Time to stop metrics (only for vehicles that stopped)
+            'avg_time_to_stop': sum(times_to_stop) / len(times_to_stop) if times_to_stop else None,
+            'min_time_to_stop': min(times_to_stop) if times_to_stop else None,
+            'max_time_to_stop': max(times_to_stop) if times_to_stop else None,
+            
+            # Distance traveled metrics (all violations)
+            'avg_distance_after_violation': sum(distances_traveled) / len(distances_traveled) if distances_traveled else 0.0,
+            'min_distance_after_violation': min(distances_traveled) if distances_traveled else 0.0,
+            'max_distance_after_violation': max(distances_traveled) if distances_traveled else 0.0,
+            
+            # Breakdown by signal type
+            'by_signal_type': self._breakdown_post_violations_by_type()
+        }
+    
+    def _breakdown_post_violations_by_type(self) -> Dict:
+        """Helper method to break down post-violation metrics by signal type"""
+        breakdown = {}
+        
+        for violation in self.completed_post_violations:
+            signal_type = violation['signal_type']
+            if signal_type not in breakdown:
+                breakdown[signal_type] = {
+                    'count': 0,
+                    'stopped_count': 0,
+                    'avg_time_to_stop': None,
+                    'avg_distance': 0.0
+                }
+            
+            breakdown[signal_type]['count'] += 1
+            breakdown[signal_type]['avg_distance'] += violation['distance_traveled_after_violation_meters']
+            
+            if violation['vehicle_stopped'] and violation['time_to_stop_seconds']:
+                breakdown[signal_type]['stopped_count'] += 1
+                
+        # Calculate averages
+        for signal_type, data in breakdown.items():
+            if data['count'] > 0:
+                data['avg_distance'] /= data['count']
+                
+                # Calculate average time to stop for stopped vehicles
+                stopped_times = [v['time_to_stop_seconds'] for v in self.completed_post_violations 
+                               if v['signal_type'] == signal_type and v['vehicle_stopped'] and v['time_to_stop_seconds']]
+                data['avg_time_to_stop'] = sum(stopped_times) / len(stopped_times) if stopped_times else None
+        
+        return breakdown 
