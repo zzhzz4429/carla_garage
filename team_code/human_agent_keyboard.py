@@ -32,8 +32,8 @@ import os
 from datetime import datetime, timedelta
 
 from leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
-from team_code.boundary_risk_estimator import BoundaryRiskEstimator
-from team_code.sotif_risk_estimator import SOTIFRiskEstimator
+from boundary_risk_estimator import BoundaryRiskEstimator
+from sotif_risk_estimator import SOTIFRiskEstimator
 
 
 # ==============================================================================
@@ -222,7 +222,7 @@ class HumanAgentSteeringWheel(AutonomousAgent):
 		"""
 		Setup the agent parameters
 		"""
-		self.track = Track.SENSORS
+		self.track = Track.MAP
 
 		self.agent_engaged = False
 		# Full HD resolution (1080p)

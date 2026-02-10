@@ -28,8 +28,9 @@ from agents.tools.misc import (is_within_distance, get_trafficlight_trigger_loca
 
 from agents.navigation.local_planner import LocalPlanner
 
-# Boundary risk estimator (GT-based)
+# Boundary risk estimators (GT-based)
 from boundary_risk_estimator import BoundaryRiskEstimator
+from sotif_risk_estimator import SOTIFRiskEstimator
 
 
 def get_entry_point():
@@ -162,11 +163,13 @@ class DataAgent(AutoPilot):
     # Visualization/debug overlays
     self.draw_boundary_debug = strtobool(os.environ.get('DRAW_BOUNDARY_RISK_DEBUG', 'True'))
     self.enable_relative_pos_debug = strtobool(os.environ.get('DRAW_RELATIVE_POS_DEBUG', 'False'))
+    self.enable_sotif_heatmap_hud = strtobool(os.environ.get('DRAW_SOTIF_HEATMAP_HUD', 'True'))
     self.debug_tick_rate = strtobool(os.environ.get('DEBUG_TICK_RATE', 'False'))
     self.debug_tick_rate_freq = int(os.environ.get('DEBUG_TICK_RATE_FREQ', 30))
     self.collision_warn_log_path = os.path.join(os.getcwd(), "collision_warning_debug.txt")
 
     if self.use_boundary_risk:
+      risk_estimator_type = str(os.environ.get('RISK_ESTIMATOR_TYPE', 'sotif')).strip().lower()
       angular_resolution = int(os.environ.get('BOUNDARY_ANGULAR_RESOLUTION', 10))
       max_range = float(os.environ.get('BOUNDARY_MAX_RANGE', 50.0))
       k_distance = float(os.environ.get('BOUNDARY_K_DISTANCE', -1.0))
@@ -175,19 +178,31 @@ class DataAgent(AutoPilot):
       risk_threshold = float(os.environ.get('BOUNDARY_RISK_THRESHOLD', 0.3))
       lateral_threshold = float(os.environ.get('BOUNDARY_LATERAL_THRESHOLD', 2.5))
 
-      self.boundary_risk_estimator = BoundaryRiskEstimator(
-          angular_resolution=angular_resolution,
-          max_range=max_range,
-          k_distance=k_distance,
-          alpha_coeff=alpha_coeff,
-          beta_coeff=beta_coeff,
-          risk_threshold=risk_threshold,
-          lateral_risk_threshold=lateral_threshold
-      )
+      if risk_estimator_type == 'sotif':
+        self.boundary_risk_estimator = SOTIFRiskEstimator(
+            angular_resolution=angular_resolution,
+            max_range=max_range,
+            k_distance=k_distance,
+            alpha_coeff=alpha_coeff,
+            beta_coeff=beta_coeff,
+            risk_threshold=risk_threshold,
+            lateral_risk_threshold=lateral_threshold
+        )
+      else:
+        self.boundary_risk_estimator = BoundaryRiskEstimator(
+            angular_resolution=angular_resolution,
+            max_range=max_range,
+            k_distance=k_distance,
+            alpha_coeff=alpha_coeff,
+            beta_coeff=beta_coeff,
+            risk_threshold=risk_threshold,
+            lateral_risk_threshold=lateral_threshold
+        )
       boundary_debug = strtobool(os.environ.get('BOUNDARY_DEBUG', 'False'))
       self.boundary_risk_estimator.set_debug(boundary_debug)
 
       print('Boundary Risk Estimator initialized (DataAgent):')
+      print(f'  Estimator type: {risk_estimator_type}')
       print(f'  Angular resolution: {angular_resolution}°')
       print(f'  Max range: {max_range}m')
       print(f'  Risk threshold: {risk_threshold}')
@@ -854,6 +869,75 @@ class DataAgent(AutoPilot):
 
     return surface
 
+  def _render_sotif_heatmap_hud(self, size=240):
+    """
+    Render SOTIF P×C risk heatmap as a compact HUD panel.
+    Expects `threat_info['heatmap']` from SOTIFRiskEstimator.
+    """
+    if self.boundary_risk_estimator is None:
+      return None
+    if not isinstance(self.boundary_risk_estimator, SOTIFRiskEstimator):
+      return None
+    if self.last_boundary_risk_info is None:
+      return None
+
+    heatmap = self.last_boundary_risk_info.get('heatmap')
+    if heatmap is None:
+      return None
+    if not isinstance(heatmap, np.ndarray) or heatmap.ndim != 2 or heatmap.size == 0:
+      return None
+
+    try:
+      # Convert grid (x forward, y right) to image (up forward, right right).
+      display_map = np.flipud(heatmap.T)
+
+      max_val = float(np.max(display_map))
+      if max_val <= 1e-8:
+        normalized = np.zeros_like(display_map, dtype=np.float32)
+      else:
+        # Robust scaling to avoid one hot pixel dominating the panel.
+        ref = max(1e-8, float(np.percentile(display_map, 99.0)))
+        normalized = np.clip(display_map / ref, 0.0, 1.0).astype(np.float32)
+
+      # Simple high-contrast "thermal" palette.
+      r = (255.0 * normalized).astype(np.uint8)
+      g = (200.0 * (1.0 - normalized)).astype(np.uint8)
+      b = (45.0 * (1.0 - normalized)).astype(np.uint8)
+      rgb = np.stack((r, g, b), axis=2)
+
+      panel = pygame.Surface((size, size), pygame.SRCALPHA).convert_alpha()
+      panel.fill((12, 12, 12, 185))
+
+      map_size = size - 24
+      heat_surface = pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
+      heat_surface = pygame.transform.smoothscale(heat_surface, (map_size, map_size))
+      panel.blit(heat_surface, (12, 12))
+
+      # Panel frame and crosshair.
+      pygame.draw.rect(panel, (220, 220, 220, 220), pygame.Rect(11, 11, map_size + 2, map_size + 2), 1)
+      center = (12 + map_size // 2, 12 + map_size // 2)
+      pygame.draw.line(panel, (120, 120, 120, 160), (center[0], 12), (center[0], 12 + map_size), 1)
+      pygame.draw.line(panel, (120, 120, 120, 160), (12, center[1]), (12 + map_size, center[1]), 1)
+
+      # Ego marker: triangle pointing upward (forward).
+      ego_size = max(6, map_size // 20)
+      ego_points = [
+          (center[0], center[1] - ego_size),
+          (center[0] - ego_size // 2, center[1] + ego_size // 2),
+          (center[0] + ego_size // 2, center[1] + ego_size // 2),
+      ]
+      pygame.draw.polygon(panel, (255, 255, 255, 230), ego_points)
+
+      if pygame.font.get_init():
+        font = self._font_mono or pygame.font.SysFont('monospace', 16)
+        title = font.render("SOTIF P*C", True, (255, 255, 255))
+        panel.blit(title, (14, 2))
+
+      return panel
+    except Exception as exc:  # pylint: disable=broad-except
+      print(f"⚠️ Failed to render SOTIF heatmap HUD: {exc}")
+      return None
+
   @torch.inference_mode()
   def run_step(self, input_data, timestamp, sensors=None, plant=False):
     self.step_tmp += 1
@@ -937,61 +1021,71 @@ class DataAgent(AutoPilot):
           self._display.blit(text_background, (text_x - 10, text_y - 5))
           self._display.blit(fps_text, (text_x, text_y))
 
-        # Risk radar HUD
-        radar_surface = self._render_risk_radar(size=240)
-        if radar_surface is not None:
-          margin = 20
-          radar_x = self._display.get_width() - radar_surface.get_width() - margin
-          radar_y = self._display.get_height() - radar_surface.get_height() - margin
-          self._display.blit(radar_surface, (radar_x, radar_y))
+        margin = 20
+        is_sotif_estimator = isinstance(self.boundary_risk_estimator, SOTIFRiskEstimator)
+        if is_sotif_estimator:
+          # SOTIF mode: show heatmap HUD only (disable polar radar HUD).
+          if self.enable_sotif_heatmap_hud:
+            sotif_surface = self._render_sotif_heatmap_hud(size=240)
+            if sotif_surface is not None:
+              heat_x = self._display.get_width() - sotif_surface.get_width() - margin
+              heat_y = self._display.get_height() - sotif_surface.get_height() - margin
+              self._display.blit(sotif_surface, (heat_x, heat_y))
+        else:
+          # Boundary mode: show polar radar HUD only (disable SOTIF heatmap HUD).
+          radar_surface = self._render_risk_radar(size=240)
+          if radar_surface is not None:
+            radar_x = self._display.get_width() - radar_surface.get_width() - margin
+            radar_y = self._display.get_height() - radar_surface.get_height() - margin
+            self._display.blit(radar_surface, (radar_x, radar_y))
 
-          max_risk = float(np.max(self.last_boundary_risk_field)) if self.last_boundary_risk_field is not None else 0.0
-          if max_risk >= 1.0 and self._font_mono is not None:
-            warn_text = self._font_mono.render("WARNING: COLLISION RISK", True, (255, 80, 80))
-            self._display.blit(warn_text, (radar_x - warn_text.get_width() - 10, radar_y + 10))
-            # Log class-0 vehicle data only when: no pedestrian, no emergency, ego speed < 1 m/s
-            try:
-              boundary_info = self.last_boundary_risk_info or {}
-              risk_field = boundary_info.get('risk_field')
-              polar_boundary = getattr(self.boundary_risk_estimator, 'last_polar_boundary', None)
+            max_risk = float(np.max(self.last_boundary_risk_field)) if self.last_boundary_risk_field is not None else 0.0
+            if max_risk >= 1.0 and self._font_mono is not None:
+              warn_text = self._font_mono.render("WARNING: COLLISION RISK", True, (255, 80, 80))
+              self._display.blit(warn_text, (radar_x - warn_text.get_width() - 10, radar_y + 10))
+              # Log class-0 vehicle data only when: no pedestrian, no emergency, ego speed < 1 m/s
+              try:
+                boundary_info = self.last_boundary_risk_info or {}
+                risk_field = boundary_info.get('risk_field')
+                polar_boundary = getattr(self.boundary_risk_estimator, 'last_polar_boundary', None)
 
-              has_ped_or_emergency = False
-              if polar_boundary is not None:
-                for boundary_point in polar_boundary:
-                  if boundary_point.get('object_index') is None:
-                    continue
-                  obj_class = boundary_point.get('object_class')
-                  if obj_class in (1, 4):
-                    has_ped_or_emergency = True
-                    break
-
-              if (not has_ped_or_emergency) and float(self.last_ego_speed) < 1.0:
-                vehicle_entries = []
-                if risk_field is not None and polar_boundary is not None:
-                  for risk_val, boundary_point in zip(risk_field, polar_boundary):
-                    if risk_val is None or float(risk_val) <= 1.0:
+                has_ped_or_emergency = False
+                if polar_boundary is not None:
+                  for boundary_point in polar_boundary:
+                    if boundary_point.get('object_index') is None:
                       continue
-                    if boundary_point.get('object_class') != 0:
-                      continue
-                    vehicle_entries.append({
-                        "radial_speed": boundary_point.get("radial_velocity_signed"),
-                        "radial_speed_unsigned": boundary_point.get("radial_velocity"),
-                        "risk": float(risk_val) if risk_val is not None else None,
-                        "distance": boundary_point.get("distance"),
-                        "lateral_offset": boundary_point.get("lateral_offset"),
-                        "object_id": boundary_point.get("object_id"),
-                        "object_x": boundary_point.get("object_x"),
-                        "object_y": boundary_point.get("object_y"),
-                    })
+                    obj_class = boundary_point.get('object_class')
+                    if obj_class in (1, 4):
+                      has_ped_or_emergency = True
+                      break
 
-                log_entry = {
-                    "timestamp": timestamp,
-                    "vehicles": vehicle_entries,
-                }
-                with open(self.collision_warn_log_path, "a", encoding="utf-8") as f:
-                  f.write(json.dumps(log_entry) + "\n")
-            except Exception as exc:
-              print(f"⚠️ Failed to log collision warning data: {exc}")
+                if (not has_ped_or_emergency) and float(self.last_ego_speed) < 1.0:
+                  vehicle_entries = []
+                  if risk_field is not None and polar_boundary is not None:
+                    for risk_val, boundary_point in zip(risk_field, polar_boundary):
+                      if risk_val is None or float(risk_val) <= 1.0:
+                        continue
+                      if boundary_point.get('object_class') != 0:
+                        continue
+                      vehicle_entries.append({
+                          "radial_speed": boundary_point.get("radial_velocity_signed"),
+                          "radial_speed_unsigned": boundary_point.get("radial_velocity"),
+                          "risk": float(risk_val) if risk_val is not None else None,
+                          "distance": boundary_point.get("distance"),
+                          "lateral_offset": boundary_point.get("lateral_offset"),
+                          "object_id": boundary_point.get("object_id"),
+                          "object_x": boundary_point.get("object_x"),
+                          "object_y": boundary_point.get("object_y"),
+                      })
+
+                  log_entry = {
+                      "timestamp": timestamp,
+                      "vehicles": vehicle_entries,
+                  }
+                  with open(self.collision_warn_log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(log_entry) + "\n")
+              except Exception as exc:
+                print(f"⚠️ Failed to log collision warning data: {exc}")
 
         pygame.display.flip()
 
