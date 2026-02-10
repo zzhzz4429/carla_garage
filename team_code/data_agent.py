@@ -11,6 +11,9 @@ import json
 import os
 import gzip
 import laspy
+import math
+import time
+import pygame
 from shapely.geometry import Polygon
 from pathlib import Path
 
@@ -25,9 +28,16 @@ from agents.tools.misc import (is_within_distance, get_trafficlight_trigger_loca
 
 from agents.navigation.local_planner import LocalPlanner
 
+# Boundary risk estimator (GT-based)
+from boundary_risk_estimator import BoundaryRiskEstimator
+
 
 def get_entry_point():
   return 'DataAgent'
+
+
+def strtobool(v):
+  return str(v).lower() in ('yes', 'y', 'true', 't', '1', 'True')
 
 
 class DataAgent(AutoPilot):
@@ -39,6 +49,79 @@ class DataAgent(AutoPilot):
     super().setup(path_to_conf_file, route_index, traffic_manager=None)
     self.weather_tmp = None
     self.step_tmp = 0
+
+    # Disable waypoint/debug visualization for DataAgent
+    self.visualize = 0
+    # Disable data collection
+    self.datagen = False
+    self.save_path = None
+
+    # Manual control / visualization configuration
+    self.camera_width = 1920
+    self.camera_height = 960
+
+    self.enable_manual_control = strtobool(os.environ.get('ENABLE_MANUAL_CONTROL', 'False'))
+    self.record_frequency = int(os.environ.get('MANUAL_RECORD_FREQUENCY', 10))
+    self.last_ai_control = None
+    self.manual_control = False
+    self.brake_pressed = False
+    self.last_switch_time = 0
+    self._display = None
+    self._clock = None
+    self._font_mono = None
+    self._joystick = None
+    self._steer_idx = 0
+    self._throttle_idx = 1
+    self._brake_idx = 2
+    self._reverse_idx = 3
+    self._handbrake_idx = 4
+    self._square_idx = 0
+
+    if self.enable_manual_control:
+      pygame.init()
+      pygame.font.init()
+      display_info = pygame.display.Info()
+      screen_w = display_info.current_w
+      screen_h = display_info.current_h
+      scale_w = screen_w / self.camera_width
+      scale_h = screen_h / self.camera_height
+      scale = min(scale_w, scale_h) * 0.9
+      scaled_width = int(self.camera_width * scale)
+      scaled_height = int(self.camera_height * scale)
+      os.environ['SDL_VIDEO_CENTERED'] = '1'
+      self._display = pygame.display.set_mode(
+          (scaled_width, scaled_height),
+          pygame.HWSURFACE | pygame.DOUBLEBUF | pygame.SCALED)
+      pygame.display.set_caption("Data Agent View")
+      self._clock = pygame.time.Clock()
+      font_name = 'courier' if os.name == 'nt' else 'mono'
+      fonts = [x for x in pygame.font.get_fonts() if font_name in x]
+      default_font = 'ubuntumono'
+      mono = default_font if default_font in fonts else fonts[0]
+      mono = pygame.font.match_font(mono)
+      self._font_mono = pygame.font.Font(mono, 24 if os.name == 'nt' else 28)
+
+      pygame.joystick.init()
+      joystick_count = pygame.joystick.get_count()
+      if joystick_count > 0:
+        if joystick_count > 1:
+          raise ValueError("Please Connect Just One Joystick")
+        self._joystick = pygame.joystick.Joystick(0)
+        self._joystick.init()
+        self._steer_idx = 0
+        self._throttle_idx = 2
+        self._brake_idx = 3
+        self._reverse_idx = 5
+        self._handbrake_idx = 4
+        self._square_idx = 1
+        self.manual_control = False
+        self.brake_pressed = False
+        self.last_switch_time = 0
+        print("Joystick initialized - Starting in AUTONOMOUS mode")
+      else:
+        self._joystick = None
+        self.manual_control = False
+        print("No steering wheel detected - autonomous control only")
 
     self.tm = traffic_manager
 
@@ -62,6 +145,55 @@ class DataAgent(AutoPilot):
     self._active_traffic_light = None
     self.last_lidar = None
     self.last_ego_transform = None
+    self._last_tick_timestamp = None
+
+    # Boundary risk estimation (GT-based from CARLA actors)
+    self.use_boundary_risk = strtobool(os.environ.get('USE_BOUNDARY_RISK', 'True'))
+    print('Use boundary risk estimation (DataAgent GT):', self.use_boundary_risk)
+
+    self.boundary_risk_estimator = None
+    self.boundary_risk_data = None
+    self.last_boundary_risk_field = None
+    self.last_boundary_risk_info = None
+    self.last_ego_speed = 0.0
+    self.collision_distance_threshold = float(os.environ.get('BOUNDARY_COLLISION_DISTANCE', '0.5'))
+    self.near_miss_distance_threshold = float(os.environ.get('BOUNDARY_NEAR_MISS_DISTANCE', '3.0'))
+
+    # Visualization/debug overlays
+    self.draw_boundary_debug = strtobool(os.environ.get('DRAW_BOUNDARY_RISK_DEBUG', 'True'))
+    self.enable_relative_pos_debug = strtobool(os.environ.get('DRAW_RELATIVE_POS_DEBUG', 'False'))
+    self.debug_tick_rate = strtobool(os.environ.get('DEBUG_TICK_RATE', 'False'))
+    self.debug_tick_rate_freq = int(os.environ.get('DEBUG_TICK_RATE_FREQ', 30))
+    self.collision_warn_log_path = os.path.join(os.getcwd(), "collision_warning_debug.txt")
+
+    if self.use_boundary_risk:
+      angular_resolution = int(os.environ.get('BOUNDARY_ANGULAR_RESOLUTION', 10))
+      max_range = float(os.environ.get('BOUNDARY_MAX_RANGE', 50.0))
+      k_distance = float(os.environ.get('BOUNDARY_K_DISTANCE', -1.0))
+      alpha_coeff = float(os.environ.get('BOUNDARY_ALPHA', 1.0))
+      beta_coeff = float(os.environ.get('BOUNDARY_BETA', 0.5))
+      risk_threshold = float(os.environ.get('BOUNDARY_RISK_THRESHOLD', 0.3))
+      lateral_threshold = float(os.environ.get('BOUNDARY_LATERAL_THRESHOLD', 2.5))
+
+      self.boundary_risk_estimator = BoundaryRiskEstimator(
+          angular_resolution=angular_resolution,
+          max_range=max_range,
+          k_distance=k_distance,
+          alpha_coeff=alpha_coeff,
+          beta_coeff=beta_coeff,
+          risk_threshold=risk_threshold,
+          lateral_risk_threshold=lateral_threshold
+      )
+      boundary_debug = strtobool(os.environ.get('BOUNDARY_DEBUG', 'False'))
+      self.boundary_risk_estimator.set_debug(boundary_debug)
+
+      print('Boundary Risk Estimator initialized (DataAgent):')
+      print(f'  Angular resolution: {angular_resolution}°')
+      print(f'  Max range: {max_range}m')
+      print(f'  Risk threshold: {risk_threshold}')
+      print(f'  Debug mode: {boundary_debug}')
+
+
 
   def _init(self, hd_map):
     super()._init(hd_map)
@@ -103,6 +235,49 @@ class DataAgent(AutoPilot):
                                                      high=self.config.camera_rotation_augmentation_max)
 
     result = super().sensors()
+
+    if self.enable_manual_control:
+      result += [
+        {
+          'type': 'sensor.camera.rgb',
+          'x': 1.4,
+          'y': 0.0,
+          'z': 1.2,
+          'roll': 0.0,
+          'pitch': 0.0,
+          'yaw': 0.0,
+          'width': self.camera_width,
+          'height': self.camera_height,
+          'fov': 110,
+          'id': 'Center'
+        },
+        {
+          'type': 'sensor.camera.rgb',
+          'x': 0.7,
+          'y': -1.0,
+          'z': 1.0,
+          'roll': 0.0,
+          'pitch': 0.0,
+          'yaw': 210.0,
+          'width': int(self.camera_width * 0.3),
+          'height': int(self.camera_height * 0.3),
+          'fov': 100,
+          'id': 'Left'
+        },
+        {
+          'type': 'sensor.camera.rgb',
+          'x': 0.7,
+          'y': 1.0,
+          'z': 1.0,
+          'roll': 0.0,
+          'pitch': 0.0,
+          'yaw': 150.0,
+          'width': int(self.camera_width * 0.3),
+          'height': int(self.camera_height * 0.3),
+          'fov': 100,
+          'id': 'Right'
+        }
+      ]
 
     if self.save_path is not None and (self.datagen or self.tmp_visu):
       result += [{
@@ -271,9 +446,431 @@ class DataAgent(AutoPilot):
 
     return result
 
+  def _map_gt_class(self, box):
+    label = box.get('class')
+    if label == 'car':
+      type_id = str(box.get('type_id', '')).lower()
+      role_name = str(box.get('role_name', '')).lower()
+      if any(tag in type_id for tag in ('ambulance', 'police', 'firetruck')) or 'emergency' in role_name:
+        return 4
+      return 0
+    if label == 'walker':
+      return 1
+    if label == 'traffic_light':
+      return 2
+    if label == 'stop_sign':
+      return 3
+    return None
+
+  def _gt_boxes_to_boundary_format(self, boxes):
+    formatted = []
+    for box in boxes:
+      if box.get('class') == 'ego_car':
+        continue
+      obj_class = self._map_gt_class(box)
+      if obj_class is None:
+        continue
+      pos = box.get('position', [0.0, 0.0, 0.0])
+      extent = box.get('extent', [0.0, 0.0, 0.0])
+      yaw = float(box.get('yaw', 0.0))
+      speed = float(box.get('speed', 0.0))
+      brake = float(box.get('brake', 0.0)) if box.get('brake') is not None else 0.0
+
+      formatted.append([
+          float(pos[0]),
+          float(pos[1]),
+          float(extent[0]),
+          float(extent[1]),
+          yaw,
+          speed,
+          brake,
+          int(obj_class),
+          int(box.get('id')) if box.get('id') is not None else None
+      ])
+    return formatted
+
+  def calculate_boundary_risk_assessment(self, ego_speed, bounding_boxes, timestamp):
+    if not self.use_boundary_risk or self.boundary_risk_estimator is None:
+      return {
+          'max_risk': 0.0,
+          'risk_level': 'SAFE',
+          'primary_threat': None,
+          'boundary_based': False,
+          'fallback_mode': True
+      }
+
+    try:
+      # Disable frame-to-frame boundary velocity; use GT speed instead
+      self.boundary_risk_estimator.last_polar_boundary = None
+
+      risk_field, _max_risk, threat_info = self.boundary_risk_estimator.calculate_boundary_risk(
+          ego_speed, bounding_boxes, timestamp
+      )
+      threat_info['risk_field'] = risk_field
+      threat_info['boundary_based'] = True
+      threat_info['fallback_mode'] = False
+      self.last_boundary_risk_field = risk_field
+      self.last_boundary_risk_info = threat_info
+      return threat_info
+    except Exception as e:
+      print(f"⚠️ Boundary risk calculation failed (DataAgent): {e}")
+      self.last_boundary_risk_field = None
+      self.last_boundary_risk_info = None
+      return {
+          'max_risk': 0.0,
+          'risk_level': 'SAFE',
+          'primary_threat': None,
+          'boundary_based': False,
+          'fallback_mode': True,
+          'error': str(e)
+      }
+
+
+  # def draw_boundary_risk_debug(self):
+  #   if (not self.draw_boundary_debug or self._world is None or self._vehicle is None or
+  #       self.last_boundary_risk_field is None or len(self.last_boundary_risk_field) == 0):
+  #     return
+
+  #   try:
+  #     transform = self._vehicle.get_transform()
+  #     base_location = transform.location + carla.Location(z=0.5)
+  #     max_range = getattr(self.boundary_risk_estimator, 'max_range', 30.0)
+  #     angles = getattr(self.boundary_risk_estimator, 'angles', None)
+  #     if angles is None:
+  #       segments = len(self.last_boundary_risk_field)
+  #       angles = np.linspace(0.0, 2.0 * math.pi, segments, endpoint=False)
+
+  #     max_risk = max(1e-3, float(np.max(self.last_boundary_risk_field)))
+
+  #     polar_boundary = getattr(self.boundary_risk_estimator, 'last_polar_boundary', None)
+  #     has_class_info = polar_boundary is not None and len(polar_boundary) == len(self.last_boundary_risk_field)
+
+  #     for idx, (angle_local, risk) in enumerate(zip(angles, self.last_boundary_risk_field)):
+  #       if risk <= 0.0:
+  #         continue
+  #       normalized = max(0.0, min(1.0, risk / max_risk))
+  #       risk_color = self._risk_to_color(normalized)
+
+  #       color_tuple = risk_color
+  #       if has_class_info:
+  #         obj_class = polar_boundary[idx].get('object_class')
+  #         if obj_class == 4:  # emergency vehicle -> blue
+  #           base_tuple = (60, 140, 255)
+  #         elif obj_class == 1:  # pedestrian -> purple
+  #           base_tuple = (180, 70, 220)
+  #         else:
+  #           base_tuple = None
+
+  #         if base_tuple:
+  #           brightness = 0.35 + 0.65 * normalized
+  #           color_tuple = (
+  #               int(base_tuple[0] * brightness),
+  #               int(base_tuple[1] * brightness),
+  #               int(base_tuple[2] * brightness),
+  #           )
+
+  #       color = carla.Color(r=color_tuple[0], g=color_tuple[1], b=color_tuple[2])
+
+  #       min_len = 3.0
+  #       max_len = min(max_range, 15.0)
+  #       length = min_len + normalized * (max_len - min_len)
+
+  #       local_x = length * math.cos(angle_local)
+  #       local_y = length * math.sin(angle_local)
+  #       end_world = transform.transform(carla.Location(x=local_x, y=local_y, z=0.0))
+
+  #       self._world.debug.draw_line(
+  #           base_location,
+  #           end_world + carla.Location(z=0.5),
+  #           thickness=0.08,
+  #           color=color,
+  #           life_time=0.1)
+  #   except Exception as exc:  # pylint: disable=broad-except
+  #     print(f"⚠️ Failed to draw boundary risk debug lines (DataAgent): {exc}")
+
+  @staticmethod
+  def _risk_to_color(value: float):
+    if value <= 0.3:
+      t = value / 0.3 if value > 0 else 0
+      r = int(30 + t * (180 - 30))
+      g = int(180 + t * (220 - 180))
+      b = int(60 + t * (80 - 60))
+    elif value <= 0.7:
+      t = (value - 0.3) / 0.4
+      r = int(180 + t * (255 - 180))
+      g = int(220 - t * (220 - 160))
+      b = int(80 - t * 60)
+    else:
+      t = min(1.0, (value - 0.7) / 0.3)
+      r = 255
+      g = int(160 - t * 120)
+      b = int(20 + t * 35)
+    return (r, g, b)
+  def draw_boundary_risk_debug(self):
+    if (not self.draw_boundary_debug or self._world is None or self._vehicle is None or
+        self.last_boundary_risk_field is None or len(self.last_boundary_risk_field) == 0):
+      return
+
+    try:
+      transform = self._vehicle.get_transform()
+      base_location = transform.location + carla.Location(z=1.0) # 稍微调高一点，避免穿模
+      
+      # 1. 改变归一化逻辑：使用固定阈值，而不是全局最大值
+      # 建议使用 self.boundary_risk_estimator.risk_threshold 或固定值 (如 1.0)
+      # 这样风险 0.1 就是绿色，1.0 以上才是深红，视觉反馈更客观
+      reference_risk = 1.0 
+
+      polar_boundary = getattr(self.boundary_risk_estimator, 'last_polar_boundary', None)
+      if polar_boundary is None: return
+
+      # 为了性能，如果分辨率很高(如360)，可以每隔2-3度画一根线
+      step = 1 if len(self.last_boundary_risk_field) <= 72 else 3
+
+      for idx in range(0, len(self.last_boundary_risk_field), step):
+        risk = float(self.last_boundary_risk_field[idx])
+        if risk <= 0.01: # 忽略极小风险，保持画面整洁
+          continue
+          
+        angle_local = self.boundary_risk_estimator.angles[idx]
+        
+        # 统一归一化：超过 reference_risk 的都算 1.0
+        normalized = max(0.0, min(1.0, risk / reference_risk))
+        
+        # 2. 颜色逻辑增强
+        obj_class = polar_boundary[idx].get('object_class', 0)
+        
+        # 默认使用风险色
+        risk_color = self._risk_to_color(normalized)
+        
+        # 如果是行人，强制使用醒目的紫色调
+        if obj_class == 1:
+            color_tuple = (255, 0, 255) # 纯霓虹紫，确保实验者一眼看到行人
+        elif obj_class == 4:
+            color_tuple = (0, 191, 255) # 深天蓝，用于警车
+        else:
+            color_tuple = risk_color
+
+        color = carla.Color(r=color_tuple[0], g=color_tuple[1], b=color_tuple[2])
+
+        # 3. 长度逻辑：不要让线太短，行人即使风险小，也要画得够长，才能起到预警作用
+        min_len = 2.0
+        if obj_class == 1: min_len = 5.0 # 行人的线保底长一些
+        
+        length = min_len + normalized * 10.0 # 长度上限设为 12-15米 即可
+
+        local_x = length * math.cos(angle_local)
+        local_y = length * math.sin(angle_local)
+        
+        # 坐标转换
+        end_world = transform.transform(carla.Location(x=local_x, y=local_y, z=0.0))
+
+        # 绘制
+        self._world.debug.draw_line(
+            base_location,
+            end_world + carla.Location(z=1.0),
+            thickness=0.1, # 稍微加粗
+            color=color,
+            life_time=0.1)
+            
+    except Exception as exc:
+      print(f"⚠️ Debug Drawing Error: {exc}")
+
+  def draw_relative_pos_debug(self):
+    if self._world is None or self._vehicle is None:
+      return
+    if getattr(self, "_relpos_last_draw_step", None) == self.step:
+      return
+    try:
+      self._relpos_last_draw_step = self.step
+      ego_transform = self._vehicle.get_transform()
+      ego_matrix = np.array(ego_transform.get_matrix())
+      vehicles = self._world.get_actors().filter('*vehicle*')
+      for vehicle in vehicles:
+        if vehicle.id == self._vehicle.id:
+          continue
+        vehicle_transform = vehicle.get_transform()
+        vehicle_matrix = np.array(vehicle_transform.get_matrix())
+        relative_pos = t_u.get_relative_transform(ego_matrix, vehicle_matrix)
+        text = f"rel x={relative_pos[0]:.1f}, y={relative_pos[1]:.1f}"
+        location = vehicle_transform.location + carla.Location(z=2.2)
+        self._world.debug.draw_string(
+            location,
+            text,
+            draw_shadow=False,
+            color=carla.Color(255, 255, 0),
+            life_time=0.05,
+            persistent_lines=False)
+    except Exception as exc:  # pylint: disable=broad-except
+      print(f"⚠️ Failed to draw relative positions: {exc}")
+  # def _render_risk_radar(self, size=250):
+  #   """Render a polar risk radar HUD surface."""
+  #   if self.last_boundary_risk_field is None or len(self.last_boundary_risk_field) == 0:
+  #     return None
+  #   if self.boundary_risk_estimator is None:
+  #     return None
+
+  #   surface = pygame.Surface((size, size), pygame.SRCALPHA)
+  #   surface = surface.convert_alpha()
+  #   center = (size // 2, size // 2)
+  #   radius = size // 2 - 8
+
+  #   # Background
+  #   surface.fill((0, 0, 0, 0))
+  #   pygame.draw.circle(surface, (40, 40, 40, 160), center, radius)
+  #   pygame.draw.circle(surface, (120, 120, 120, 160), center, radius, 1)
+
+  #   # Crosshairs
+  #   pygame.draw.line(surface, (90, 90, 90, 140), (center[0], center[1] - radius),
+  #                    (center[0], center[1] + radius), 1)
+  #   pygame.draw.line(surface, (90, 90, 90, 140), (center[0] - radius, center[1]),
+  #                    (center[0] + radius, center[1]), 1)
+
+  #   risk_field = self.last_boundary_risk_field
+  #   angles = getattr(self.boundary_risk_estimator, 'angles', None)
+  #   if angles is None:
+  #     angles = np.linspace(0.0, 2.0 * math.pi, len(risk_field), endpoint=False)
+
+  #   max_display_risk = 1.0
+  #   for value in risk_field:
+  #     max_display_risk = max(max_display_risk, float(value))
+
+  #   for angle, risk in zip(angles, risk_field):
+  #     if risk <= 0.0:
+  #       continue
+  #     normalized = max(0.0, min(1.0, float(risk) / max_display_risk))
+  #     color = self._risk_to_color(normalized)
+  #     display_angle = angle - math.pi / 2.0  # 0° forward -> up
+  #     length = int(normalized * radius)
+  #     end_pos = (
+  #         int(center[0] + length * math.cos(display_angle)),
+  #         int(center[1] + length * math.sin(display_angle)),
+  #     )
+  #     pygame.draw.line(surface, color, center, end_pos, 3)
+
+  #   # Ego triangle (pointing up)
+  #   ego_size = 8
+  #   ego_points = [
+  #       (center[0], center[1] - ego_size),
+  #       (center[0] - ego_size // 2, center[1] + ego_size // 2),
+  #       (center[0] + ego_size // 2, center[1] + ego_size // 2),
+  #   ]
+  #   pygame.draw.polygon(surface, (240, 240, 240, 220), ego_points)
+
+  #   return surface
+  def _render_risk_radar(self, size=250):
+    """
+    渲染极坐标风险雷达 HUD。
+    优化点：固定比例尺、行人视觉增强、坐标对齐。
+    """
+    if self.last_boundary_risk_field is None or len(self.last_boundary_risk_field) == 0:
+      return None
+    if self.boundary_risk_estimator is None:
+      return None
+
+    # 1. 初始化 Surface (支持透明度)
+    surface = pygame.Surface((size, size), pygame.SRCALPHA)
+    surface = surface.convert_alpha()
+    center = (size // 2, size // 2)
+    radius = size // 2 - 10
+
+    # 2. 绘制背景圆盘与装饰线 (深色半透明，提升对比度)
+    surface.fill((0, 0, 0, 0))
+    pygame.draw.circle(surface, (20, 20, 20, 180), center, radius) 
+    pygame.draw.circle(surface, (180, 180, 180, 255), center, radius, 2) # 外边框
+
+    # 绘制十字参考线 (前方、后方、左右)
+    line_color = (100, 100, 100, 150)
+    pygame.draw.line(surface, line_color, (center[0], center[1] - radius), (center[0], center[1] + radius), 1)
+    pygame.draw.line(surface, line_color, (center[0] - radius, center[1]), (center[0] + radius, center[1]), 1)
+
+    # 3. 获取风险数据与类别信息
+    risk_field = self.last_boundary_risk_field
+    angles = getattr(self.boundary_risk_estimator, 'angles', None)
+    polar_boundary = getattr(self.boundary_risk_estimator, 'last_polar_boundary', None)
+    
+    # 【核心优化】固定参考量纲：
+    # 不再使用 max(risk_field)，因为那会导致远处的弱威胁被强行放大。
+    # 我们设定 1.0 为“满额风险”长度。
+    reference_risk = 1.0 
+
+    for i, (angle, risk) in enumerate(zip(angles, risk_field)):
+      if risk <= 0.01: # 忽略背景杂讯
+        continue
+
+      # 归一化 (0.0 到 1.0)
+      normalized = max(0.0, min(1.0, float(risk) / reference_risk))
+      
+      # 获取物体类别
+      obj_class = 0
+      if polar_boundary is not None and i < len(polar_boundary):
+        obj_class = polar_boundary[i].get('object_class', 0)
+
+      # 4. 颜色分配逻辑
+      if obj_class == 1: # 行人：绝对醒目的紫色
+        color = (255, 0, 255, 255)
+      elif obj_class == 4: # 紧急车辆：蓝色
+        color = (0, 191, 255, 255)
+      else:
+        # 使用类名调用静态方法，修复之前的属性错误
+        color_rgb = DataAgent._risk_to_color(normalized)
+        color = (color_rgb[0], color_rgb[1], color_rgb[2], 255)
+
+      # 5. 坐标转换 (CARLA 0°是右 -> Pygame 0°是上)
+      display_angle = angle - math.pi / 2.0 
+      
+      # 6. 长度与线宽优化
+      # 行人保底长度为半径的 35%，确保即使风险低也能被看见
+      min_len_ratio = 0.35 if obj_class == 1 else 0.1
+      length = int(max(min_len_ratio, normalized) * radius)
+      
+      # 行人线条加粗到 5 像素，普通车辆为 3 像素
+      line_width = 5 if obj_class == 1 else 3
+      
+      end_pos = (
+          int(center[0] + length * math.cos(display_angle)),
+          int(center[1] + length * math.sin(display_angle)),
+      )
+      
+      pygame.draw.line(surface, color, center, end_pos, line_width)
+
+    # 7. 绘制自车图标 (白色小三角形)
+    ego_size = 10
+    ego_points = [
+        (center[0], center[1] - ego_size), # 前端
+        (center[0] - ego_size//1.5, center[1] + ego_size//1.5), # 左后
+        (center[0] + ego_size//1.5, center[1] + ego_size//1.5)  # 右后
+    ]
+    pygame.draw.polygon(surface, (255, 255, 255, 255), ego_points)
+
+    # 8. 显示自车速度（m/s）
+    speed_value = float(self.last_ego_speed) if self.last_ego_speed is not None else 0.0
+    speed_text = f"Ego: {speed_value:.1f} m/s"
+    if pygame.font.get_init():
+      font = self._font_mono or pygame.font.SysFont('monospace', 18)
+      text_surf = font.render(speed_text, True, (255, 255, 255))
+      text_x = (size - text_surf.get_width()) // 2
+      text_y = 6
+      surface.blit(text_surf, (text_x, text_y))
+
+    return surface
+
   @torch.inference_mode()
   def run_step(self, input_data, timestamp, sensors=None, plant=False):
     self.step_tmp += 1
+    current_time = time.time()
+    if self.debug_tick_rate:
+      if self._last_tick_timestamp is not None:
+        delta_t = float(timestamp - self._last_tick_timestamp)
+        if delta_t > 0 and (self.step_tmp % max(1, self.debug_tick_rate_freq) == 0):
+          tick_rate = 1.0 / delta_t
+          print(f"[TickRate] game_dt={delta_t:.4f}s rate={tick_rate:.2f} Hz step={self.step_tmp}")
+      self._last_tick_timestamp = float(timestamp)
+
+    mirror_width = None
+    mirror_height = None
+    if self.enable_manual_control and self._display is not None:
+      mirror_width = int(self._display.get_width() * 0.2)
+      mirror_height = int(self._display.get_height() * 0.2)
 
     # Convert LiDAR into the coordinate frame of the ego vehicle
     input_data['lidar'] = t_u.lidar_to_ego_coordinate(self.config, input_data['lidar'])
@@ -286,6 +883,167 @@ class DataAgent(AutoPilot):
 
     tick_data = self.tick(input_data)
 
+    manual_override = False
+    manual_control_cmd = None
+
+    if self.enable_manual_control:
+      for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+          return
+        elif event.type == pygame.JOYBUTTONDOWN and self._joystick is not None:
+          if event.button == self._square_idx:
+            if current_time - self.last_switch_time > 0.2:
+              self.manual_control = not self.manual_control
+              self.last_switch_time = current_time
+
+      # Optional visualization overlay for manual supervision
+      if self._display is not None and 'Center' in input_data:
+        self._display.fill((0, 0, 0))
+
+        image = input_data['Center'][1][:, :, :3][:, :, ::-1]
+        surface = pygame.surfarray.make_surface(image.swapaxes(0, 1))
+        surface = pygame.transform.scale(surface, (self._display.get_width(), self._display.get_height()))
+        self._display.blit(surface, (0, 0))
+
+        if mirror_width and 'Right' in input_data:
+          right_mirror = input_data['Right'][1][:, :, :3][:, :, ::-1]
+          right_surface = pygame.surfarray.make_surface(right_mirror.swapaxes(0, 1))
+          right_surface = pygame.transform.scale(right_surface, (mirror_width, mirror_height))
+          mirror_x = self._display.get_width() - mirror_width - 10
+          mirror_y = 10
+          self._display.blit(right_surface, (mirror_x, mirror_y))
+
+        if mirror_width and 'Left' in input_data:
+          left_mirror = input_data['Left'][1][:, :, :3][:, :, ::-1]
+          left_surface = pygame.surfarray.make_surface(left_mirror.swapaxes(0, 1))
+          left_surface = pygame.transform.scale(left_surface, (mirror_width, mirror_height))
+          mirror_x = 10
+          mirror_y = 10
+          self._display.blit(left_surface, (mirror_x, mirror_y))
+
+        if self._font_mono is not None and self._clock is not None:
+          self._clock.tick()
+          fps = self._clock.get_fps()
+          mode_text = "Manual Control" if self.manual_control else "Autonomous Control"
+          fps_text = self._font_mono.render(
+              f'FPS: {fps:.0f} - {mode_text} (Press Square to switch)', True, (255, 255, 255))
+          text_width = fps_text.get_width()
+          text_height = fps_text.get_height()
+          text_x = (self._display.get_width() - text_width) // 2
+          text_y = self._display.get_height() - text_height - 10
+          text_background = pygame.Surface((text_width + 20, text_height + 10))
+          text_background.fill((0, 0, 0))
+          text_background.set_alpha(128)
+          self._display.blit(text_background, (text_x - 10, text_y - 5))
+          self._display.blit(fps_text, (text_x, text_y))
+
+        # Risk radar HUD
+        radar_surface = self._render_risk_radar(size=240)
+        if radar_surface is not None:
+          margin = 20
+          radar_x = self._display.get_width() - radar_surface.get_width() - margin
+          radar_y = self._display.get_height() - radar_surface.get_height() - margin
+          self._display.blit(radar_surface, (radar_x, radar_y))
+
+          max_risk = float(np.max(self.last_boundary_risk_field)) if self.last_boundary_risk_field is not None else 0.0
+          if max_risk >= 1.0 and self._font_mono is not None:
+            warn_text = self._font_mono.render("WARNING: COLLISION RISK", True, (255, 80, 80))
+            self._display.blit(warn_text, (radar_x - warn_text.get_width() - 10, radar_y + 10))
+            # Log class-0 vehicle data only when: no pedestrian, no emergency, ego speed < 1 m/s
+            try:
+              boundary_info = self.last_boundary_risk_info or {}
+              risk_field = boundary_info.get('risk_field')
+              polar_boundary = getattr(self.boundary_risk_estimator, 'last_polar_boundary', None)
+
+              has_ped_or_emergency = False
+              if polar_boundary is not None:
+                for boundary_point in polar_boundary:
+                  if boundary_point.get('object_index') is None:
+                    continue
+                  obj_class = boundary_point.get('object_class')
+                  if obj_class in (1, 4):
+                    has_ped_or_emergency = True
+                    break
+
+              if (not has_ped_or_emergency) and float(self.last_ego_speed) < 1.0:
+                vehicle_entries = []
+                if risk_field is not None and polar_boundary is not None:
+                  for risk_val, boundary_point in zip(risk_field, polar_boundary):
+                    if risk_val is None or float(risk_val) <= 1.0:
+                      continue
+                    if boundary_point.get('object_class') != 0:
+                      continue
+                    vehicle_entries.append({
+                        "radial_speed": boundary_point.get("radial_velocity_signed"),
+                        "radial_speed_unsigned": boundary_point.get("radial_velocity"),
+                        "risk": float(risk_val) if risk_val is not None else None,
+                        "distance": boundary_point.get("distance"),
+                        "lateral_offset": boundary_point.get("lateral_offset"),
+                        "object_id": boundary_point.get("object_id"),
+                        "object_x": boundary_point.get("object_x"),
+                        "object_y": boundary_point.get("object_y"),
+                    })
+
+                log_entry = {
+                    "timestamp": timestamp,
+                    "vehicles": vehicle_entries,
+                }
+                with open(self.collision_warn_log_path, "a", encoding="utf-8") as f:
+                  f.write(json.dumps(log_entry) + "\n")
+            except Exception as exc:
+              print(f"⚠️ Failed to log collision warning data: {exc}")
+
+        pygame.display.flip()
+
+      # Handle manual control via joystick if enabled
+      if self._joystick is not None:
+        num_axes = self._joystick.get_numaxes()
+        js_inputs = [float(self._joystick.get_axis(i)) for i in range(num_axes)]
+
+        brake_cmd = 1.6 + (2.05 * math.log10(-0.7 * js_inputs[self._brake_idx] + 1.4) - 1.2) / 0.92
+        if brake_cmd <= 0:
+          brake_cmd = 0
+        elif brake_cmd > 0:
+          brake_cmd = 1
+
+        if self.manual_control:
+          K1 = 1.0
+          steer_cmd = K1 * math.tan(1.1 * js_inputs[self._steer_idx])
+
+          K2 = 1.6
+          throttle_cmd = K2 + (2.05 * math.log10(-0.7 * js_inputs[self._throttle_idx] + 1.4) - 1.2) / 0.92
+          if throttle_cmd <= 0:
+            throttle_cmd = 0
+          elif throttle_cmd > 1:
+            throttle_cmd = 1
+
+          human_control = carla.VehicleControl(
+              steer=float(steer_cmd),
+              throttle=float(throttle_cmd),
+              brake=float(brake_cmd))
+
+          manual_override = True
+          manual_control_cmd = human_control
+
+    # =================================================================
+    # Boundary risk assessment using GT bounding boxes
+    # =================================================================
+    if self.use_boundary_risk and self.boundary_risk_estimator is not None:
+      ego_speed = self._get_forward_speed(transform=self._vehicle.get_transform(),
+                                          velocity=self._vehicle.get_velocity())
+      self.last_ego_speed = ego_speed
+      gt_boxes = tick_data.get('bounding_boxes', [])
+      bbs_vehicle_coordinate_system = self._gt_boxes_to_boundary_format(gt_boxes)
+
+      if bbs_vehicle_coordinate_system:
+        boundary_risk_info = self.calculate_boundary_risk_assessment(
+            ego_speed, bbs_vehicle_coordinate_system, timestamp
+        )
+        if self.draw_boundary_debug:
+          self.draw_boundary_risk_debug()
+        if self.enable_relative_pos_debug:
+          self.draw_relative_pos_debug()
+
     if self.step % self.config.data_save_freq == 0:
       if self.save_path is not None and self.datagen:
         self.save_sensors(tick_data)
@@ -297,6 +1055,8 @@ class DataAgent(AutoPilot):
       # Control contains data when run with plant
       return {**tick_data, **control}
     else:
+      if manual_override:
+        return manual_control_cmd
       return control
 
   def augment_camera(self, sensors):
@@ -400,6 +1160,7 @@ class DataAgent(AutoPilot):
 
   def destroy(self, results=None):
     torch.cuda.empty_cache()
+
 
     if results is not None and self.save_path is not None:
       with gzip.open(os.path.join(self.save_path, 'results.json.gz'), 'wt', encoding='utf-8') as f:
@@ -795,3 +1556,4 @@ class DataAgent(AutoPilot):
     forward_speed = np.dot(velocity_np, orientation_vector)
 
     return forward_speed
+
