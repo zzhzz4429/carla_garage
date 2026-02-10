@@ -25,7 +25,7 @@ import time
 class BoundaryRiskEstimator:
     """
     Standalone implementation of boundary-based external risk estimation.
-    
+ 
     This class implements the methodology from the research proposal:
     1. Polar boundary construction (360° ray casting)
     2. Directional risk computation (physics-grounded formula)
@@ -33,12 +33,15 @@ class BoundaryRiskEstimator:
     """
     
     def __init__(self, 
-                 angular_resolution: int = 10,
+                 angular_resolution: int = 72,
                  max_range: float = 50.0,
-                 k_distance: float = -1.0,
+                 k_distance: float = -2.0,
                  alpha_coeff: float = 1.0,
                  beta_coeff: float = 0.5,
-                 risk_threshold: float = 0.3):
+                 risk_threshold: float = 10.0,
+                 lateral_risk_threshold: float = 2.5,
+                 min_pedestrian_risk: float = 0.6,
+                 pedestrian_lateral_threshold: float = 8.0):
         """
         Initialize the boundary risk estimator.
         
@@ -56,19 +59,36 @@ class BoundaryRiskEstimator:
         self.alpha = alpha_coeff
         self.beta = beta_coeff
         self.tau = risk_threshold
+        self.lateral_risk_threshold = lateral_risk_threshold
+        self.min_pedestrian_risk = min_pedestrian_risk
+        self.pedestrian_lateral_threshold = pedestrian_lateral_threshold
         
         # Pre-compute angular sectors for efficiency
         self.angles = np.linspace(0, 2*np.pi, self.M, endpoint=False)
+
+        # Object-centric tracking with temporal smoothing
+        self.tracked_objects: Dict[int, Dict] = {}
+        self.track_ttl_frames = 10
+        self.smoothing_alpha = 0.35
+        self.range_rate_alpha = 0.3
         
         # Class-specific weights (from paper methodology)
         # m_O: Object presence weights   
         # m_D: Dynamic/velocity  
         self.class_weights = { 
-            0: {'m_O': 1.0, 'm_D': 1.0},   # Vehicle
+            0: {'m_O': 0.0, 'm_D': 1.0},   # Vehicle
             1: {'m_O': 1.2, 'm_D': 0.8},   # Pedestrian (higher presence risk, lower velocity weight)
             2: {'m_O': 0.5, 'm_D': 0.0},   # Red Light (static, handled separately)
             3: {'m_O': 0.5, 'm_D': 0.0},   # Stop Sign (static, handled separately)
             4: {'m_O': 1.5, 'm_D': 1.3}    # Emergency Vehicle (highest weights)
+        }
+        # Unified class names for downstream UI/alerts
+        self.class_names = {
+            0: "vehicle",
+            1: "pedestrian",
+            2: "traffic light",
+            3: "stop sign",
+            4: "emergency"
         }
         
         # Vehicle dimensions for boundary detection
@@ -86,6 +106,29 @@ class BoundaryRiskEstimator:
     def set_debug(self, debug: bool):
         """Enable/disable debug output"""
         self.debug = debug
+    
+    def map_object_class(self, raw_class: int) -> int:
+        """
+        Map detector-specific class IDs to unified categories:
+          0: vehicle, 1: pedestrian, 2: traffic light, 3: stop sign, 4: emergency
+        Supports both our 5-class setup and common COCO-style IDs.
+        """
+        # Already unified (our 5-class setup)
+        if raw_class in self.class_weights:
+            return raw_class
+        
+        # COCO-style aliases
+        if raw_class == 0:   # person
+            return 1
+        if raw_class in (1, 2, 3, 5, 7):  # bicycle, car, motorcycle, bus, truck
+            return 0
+        if raw_class == 9:   # traffic light
+            return 2
+        if raw_class == 11:  # stop sign
+            return 3
+        
+        # Fallback to vehicle
+        return 0
         
     def calculate_boundary_risk(self,
                                 ego_speed: float,
@@ -96,7 +139,7 @@ class BoundaryRiskEstimator:
         
         Args:
             ego_speed: Current ego vehicle speed (m/s)
-            bounding_boxes: List of detected objects [x, y, w, h, yaw, speed, brake, class]
+            bounding_boxes: List of detected objects [x, y, w, h, yaw(deg), speed, brake, class, id?]
             timestamp: Optional simulation timestamp (seconds) for delta-t estimation
             
         Returns:
@@ -171,75 +214,197 @@ class BoundaryRiskEstimator:
             List of boundary points for each angular sector
         """
         polar_boundary = []
-        
-        for i, angle in enumerate(self.angles):
-            # Ray direction (unit vector)
-            ray_dir = np.array([np.cos(angle), np.sin(angle)])
-            
-            # Find nearest intersection with any object
-            min_distance = self.max_range
-            nearest_object = None
-            fallback_velocity = 0.0
-            
-            for j, bb in enumerate(bounding_boxes):
-                # Object position and properties
-                obj_x, obj_y = bb[0], bb[1]
-                obj_w, obj_h = bb[2], bb[3]
-                obj_yaw = bb[4] if len(bb) > 4 else 0.0
-                obj_speed = bb[5] if len(bb) > 5 else 0.0
-                obj_class = int(bb[7]) if len(bb) > 7 else 0
-                
-                # Calculate distance to object boundary along ray
-                distance = self.ray_object_intersection(ray_dir, obj_x, obj_y, obj_w, obj_h, obj_yaw)
-                
-                if distance < min_distance:
-                    min_distance = distance
-                    nearest_object = j
-                    
-                    # Calculate radial velocity (approaching speed)
-                    # Project object velocity onto ray direction
-                    if len(bb) > 5 and obj_speed > 0:
-                        # Assume object moves in its heading direction
-                        obj_vel_x = obj_speed * np.cos(obj_yaw)
-                        obj_vel_y = obj_speed * np.sin(obj_yaw)
-                        obj_velocity_vec = np.array([obj_vel_x, obj_vel_y])
-                        
-                        # Relative velocity (object - ego, projected onto ray)
-                        ego_velocity_vec = np.array([ego_speed, 0.0])
-                        relative_vel = obj_velocity_vec - ego_velocity_vec
-                        
-                        # Radial component (positive = approaching)
-                        fallback_velocity = -np.dot(relative_vel, ray_dir)
-            
-            # Store boundary point information
-            radial_velocity = 0.0
-            if self.last_polar_boundary is not None and self.last_delta_t and nearest_object is not None:
-                if i < len(self.last_polar_boundary):
-                    prev_distance = self.last_polar_boundary[i]['distance']
-                    if (prev_distance is not None and prev_distance < self.max_range
-                            and min_distance < self.max_range):
-                        radial_velocity = (prev_distance - min_distance) / max(delta_t, 1e-3)
-                        # Limit excessively large magnitudes
-                        radial_velocity = float(np.clip(radial_velocity, -100.0, 100.0))
+        sector_size = (2.0 * np.pi) / self.M
 
-            if radial_velocity <= 0.0 and fallback_velocity > 0.0:
-                radial_velocity = fallback_velocity
-
-            radial_velocity = max(0.0, radial_velocity)
-
-            boundary_point = {
+        # Initialize empty boundary with max range
+        for angle in self.angles:
+            polar_boundary.append({
                 'angle': angle,
-                'distance': min_distance,
-                'radial_velocity': radial_velocity,
-                'object_index': nearest_object,
-                'object_class': int(bounding_boxes[nearest_object][7]) if nearest_object is not None and len(bounding_boxes[nearest_object]) > 7 else 0
+                'distance': self.max_range,
+                'radial_velocity': 0.0,
+                'radial_velocity_signed': 0.0,
+                'object_index': None,
+                'object_class': None,
+                'object_id': None,
+                'lateral_offset': None
+            })
+
+        detected_ids = set()
+        transient_objects = []
+
+        # Update tracked objects with smoothing
+        for bb in bounding_boxes:
+            obj_x, obj_y = bb[0], bb[1]
+            obj_w, obj_h = bb[2], bb[3]
+            obj_yaw_deg = bb[4] if len(bb) > 4 else 0.0
+            obj_yaw = np.radians(obj_yaw_deg)
+            obj_speed = bb[5] if len(bb) > 5 else 0.0
+            raw_class = int(bb[7]) if len(bb) > 7 else 0
+            obj_class = self.map_object_class(raw_class)
+            obj_id = int(bb[8]) if len(bb) > 8 and bb[8] is not None else None
+
+            distance_raw = float(np.hypot(obj_x, obj_y))
+
+            # Local-frame longitudinal assumption: ego velocity aligned with +x.
+            obj_vel_x = obj_speed * np.cos(obj_yaw)
+            obj_vel_y = obj_speed * np.sin(obj_yaw)
+            obj_velocity_vec = np.array([obj_vel_x, obj_vel_y])
+            ego_velocity_vec = np.array([ego_speed, 0.0])
+            relative_vel = obj_velocity_vec - ego_velocity_vec
+            ray_dir = np.array([obj_x, obj_y]) / max(distance_raw, 1e-3)
+            fallback_velocity = -float(np.dot(relative_vel, ray_dir))
+
+            if obj_id is None:
+                transient_objects.append({
+                    'id': None,
+                    'class': obj_class,
+                    'x': obj_x,
+                    'y': obj_y,
+                    'w': obj_w,
+                    'h': obj_h,
+                    'yaw': obj_yaw,
+                    'distance': distance_raw,
+                    'radial_velocity_signed': fallback_velocity,
+                    'radial_velocity': max(0.0, fallback_velocity),
+                    'last_distance': distance_raw,
+                    'range_rate': 0.0,
+                    'relative_vel': relative_vel,
+                })
+                continue
+
+            detected_ids.add(obj_id)
+            prev = self.tracked_objects.get(obj_id)
+            if prev:
+                prev_last_distance = prev.get('last_distance', prev['distance'])
+                range_rate_raw = (distance_raw - prev_last_distance) / max(delta_t, 1e-3)
+                range_rate = (self.range_rate_alpha * range_rate_raw +
+                              (1.0 - self.range_rate_alpha) * prev.get('range_rate', range_rate_raw))
+                smoothed_dist = (self.smoothing_alpha * distance_raw +
+                                 (1.0 - self.smoothing_alpha) * prev['distance'])
+                smoothed_rv_signed = (self.smoothing_alpha * fallback_velocity +
+                                      (1.0 - self.smoothing_alpha) * prev['radial_velocity_signed'])
+            else:
+                smoothed_dist = distance_raw
+                smoothed_rv_signed = fallback_velocity
+                range_rate_raw = 0.0
+                range_rate = 0.0
+
+            self.tracked_objects[obj_id] = {
+                'id': obj_id,
+                'class': obj_class,
+                'x': obj_x,
+                'y': obj_y,
+                'w': obj_w,
+                'h': obj_h,
+                'yaw': obj_yaw,
+                'distance': smoothed_dist,
+                'radial_velocity_signed': smoothed_rv_signed,
+                'radial_velocity': max(0.0, smoothed_rv_signed),
+                'last_distance': distance_raw,
+                'range_rate': range_rate,
+                'relative_vel': relative_vel,
+                'ttl': self.track_ttl_frames,
+                'vel_x': obj_vel_x,
+                'vel_y': obj_vel_y,
+                'force_zero': False
             }
-            
-            polar_boundary.append(boundary_point)
-            
-            if self.debug and i % 90 == 0:  # Debug every 90 degrees
-                print(f"  Angle {np.degrees(angle):3.0f}°: dist={min_distance:.2f}m, v_r={object_velocity:.2f}m/s")
-        
+
+        # Decrement TTL for missing objects
+        for obj_id in list(self.tracked_objects.keys()):
+            if obj_id not in detected_ids:
+                obj = self.tracked_objects[obj_id]
+                # Dead reckoning during TTL
+                prev_last_distance = obj.get('last_distance', obj['distance'])
+                obj['x'] += obj.get('vel_x', 0.0) * delta_t
+                obj['y'] += obj.get('vel_y', 0.0) * delta_t
+                obj['distance'] = float(np.hypot(obj['x'], obj['y']))
+
+                ray_dir = np.array([obj['x'], obj['y']]) / max(obj['distance'], 1e-3)
+                relative_vel = np.array([obj.get('vel_x', 0.0), obj.get('vel_y', 0.0)]) - np.array([ego_speed, 0.0])
+                obj['radial_velocity_signed'] = -float(np.dot(relative_vel, ray_dir))
+                obj['radial_velocity'] = max(0.0, obj['radial_velocity_signed'])
+                raw_range_rate = (obj['distance'] - prev_last_distance) / max(delta_t, 1e-3)
+                obj['range_rate'] = (self.range_rate_alpha * raw_range_rate +
+                                     (1.0 - self.range_rate_alpha) * obj.get('range_rate', raw_range_rate))
+                obj['relative_vel'] = relative_vel
+                obj['last_distance'] = obj['distance']
+
+                angle_deg = (math.degrees(np.arctan2(obj['y'], obj['x'])) + 360.0) % 360.0
+                in_lateral_rear = 85.0 < angle_deg < 275.0
+                if obj.get('passed_lateral'):
+                    obj['force_zero'] = True
+                elif in_lateral_rear and obj['radial_velocity_signed'] <= 0.0:
+                    obj['passed_lateral'] = True
+                    obj['force_zero'] = True
+
+                obj['ttl'] -= 1
+                if obj['ttl'] <= 0:
+                    del self.tracked_objects[obj_id]
+
+        # Combine tracked + transient objects for projection
+        active_objects = list(self.tracked_objects.values()) + transient_objects
+
+        def angle_to_sector(theta):
+            return int(np.floor(theta / sector_size)) % self.M
+
+        for obj in active_objects:
+            obj_x = obj['x']
+            obj_y = obj['y']
+            obj_w = obj['w']
+            obj_h = obj['h']
+            obj_yaw = obj['yaw']
+
+            # Compute angular span from bbox corners
+            dx = obj_w / 2.0
+            dy = obj_h / 2.0
+            corners_local = np.array([
+                [ dx,  dy],
+                [ dx, -dy],
+                [-dx,  dy],
+                [-dx, -dy],
+            ])
+            rot = np.array([[np.cos(obj_yaw), -np.sin(obj_yaw)],
+                            [np.sin(obj_yaw),  np.cos(obj_yaw)]])
+            corners_world = (rot @ corners_local.T).T + np.array([obj_x, obj_y])
+            angles = np.mod(np.arctan2(corners_world[:, 1], corners_world[:, 0]), 2.0 * np.pi)
+
+            theta_min = np.min(angles)
+            theta_max = np.max(angles)
+            if theta_max - theta_min > np.pi:
+                spans = [(0.0, theta_min), (theta_max, 2.0 * np.pi)]
+            else:
+                spans = [(theta_min, theta_max)]
+
+            for span_min, span_max in spans:
+                start_idx = angle_to_sector(span_min)
+                end_idx = angle_to_sector(span_max)
+                if span_min <= span_max:
+                    indices = range(start_idx, end_idx + 1)
+                else:
+                    indices = list(range(start_idx, self.M)) + list(range(0, end_idx + 1))
+
+                for idx in indices:
+                    angle = self.angles[idx]
+                    distance = obj['distance']
+                    if distance < polar_boundary[idx]['distance']:
+                        ray_unit_vec = np.array([np.cos(angle), np.sin(angle)])
+                        v_r_ray = -float(np.dot(obj.get('relative_vel', np.array([0.0, 0.0])), ray_unit_vec))
+                        if obj.get('range_rate', 0.0) > 0.05:
+                            v_r_ray = min(v_r_ray, 0.0)
+                        polar_boundary[idx] = {
+                            'angle': angle,
+                            'distance': distance,
+                            'radial_velocity': max(0.0, v_r_ray),
+                            'radial_velocity_signed': v_r_ray,
+                            'object_index': obj.get('id'),
+                            'object_class': obj['class'],
+                            'object_id': obj.get('id'),
+                            'object_range_rate': obj.get('range_rate', 0.0),
+                            'lateral_offset': distance * np.sin(angle) if distance < self.max_range else None,
+                            'object_x': obj_x,
+                            'object_y': obj_y
+                        }
+
         return polar_boundary
     
     def ray_object_intersection(self,
@@ -328,11 +493,59 @@ class BoundaryRiskEstimator:
         for i, boundary_point in enumerate(polar_boundary):
             distance = boundary_point['distance']
             radial_velocity = boundary_point['radial_velocity']
+            signed_radial_velocity = boundary_point.get('radial_velocity_signed', radial_velocity)
             obj_class = boundary_point['object_class']
+            lateral_offset = boundary_point.get('lateral_offset')
+            angle_deg = (math.degrees(boundary_point['angle']) + 360.0) % 360.0
+            obj_x = boundary_point.get('object_x')
+            obj_y = boundary_point.get('object_y')
+            obj_range_rate = boundary_point.get('object_range_rate', 0.0)
             
             # Skip if no object detected in this direction
             if boundary_point['object_index'] is None:
                 continue
+            if lateral_offset is None:
+                continue
+
+
+            # Semantic-first receding/passed filter for vehicles
+            if obj_class == 0:
+                if obj_range_rate > 0.05:
+                    risk_field[i] = 0.0
+                    continue
+                # Geometry-based pass-by cutoff: object center behind ego lateral plane
+                if obj_x is not None and obj_x < 0.0:
+                    # Require meaningful lateral separation to avoid suppressing same-lane rear approach
+                    if obj_y is not None and abs(obj_y) >= self.lateral_risk_threshold:
+                        risk_field[i] = 0.0
+                        continue
+
+                in_lateral_rear = 85.0 < angle_deg < 275.0
+                obj_id = boundary_point.get('object_id')
+                passed_lateral = False
+                if obj_id is not None and obj_id in self.tracked_objects:
+                    passed_lateral = self.tracked_objects[obj_id].get('passed_lateral', False)
+                    if self.tracked_objects[obj_id].get('force_zero'):
+                        risk_field[i] = 0.0
+                        continue
+                    if in_lateral_rear and signed_radial_velocity < -0.01 and not passed_lateral:
+                        self.tracked_objects[obj_id]['passed_lateral'] = True
+                        passed_lateral = True
+
+                # Condition A: lateral-to-rear and not approaching
+                if in_lateral_rear and signed_radial_velocity <= 0.0:
+                    risk_field[i] = 0.0
+                    continue
+
+                # Condition B: clearly receding regardless of angle
+                if signed_radial_velocity < -0.01:
+                    risk_field[i] = 0.0
+                    continue
+
+                # Hysteresis: once passed, keep off in rear while non-approaching
+                if passed_lateral and in_lateral_rear and signed_radial_velocity <= 0.0:
+                    risk_field[i] = 0.0
+                    continue
             
             # Get class-specific weights
             weights = self.class_weights.get(obj_class, {'m_O': 1.0, 'm_D': 1.0})
@@ -347,10 +560,37 @@ class BoundaryRiskEstimator:
             distance_term = self.alpha * m_O * (safe_distance ** self.k)
             
             # Term 2: Velocity-based risk (approaching faster = higher risk)
-            velocity_term = self.beta * m_D * radial_velocity * (safe_distance ** (self.k + 1))
+            velocity_term = self.beta * m_D * max(0.0, signed_radial_velocity) * (safe_distance ** self.k)
+            # Lane-aware suppression for velocity term outside ego lane
+            if abs(lateral_offset) > 2.2:
+                velocity_term *= 0.2
+
+            # Lateral attenuation: objects beyond threshold contribute less risk
+            lateral_factor = 1.0
+            lateral_threshold = self.lateral_risk_threshold
+            if obj_class == 1:
+                lateral_threshold = self.pedestrian_lateral_threshold
+            if lateral_threshold > 0:
+                excess = max(0.0, abs(lateral_offset) - lateral_threshold)
+                if excess > 0:
+                    lateral_factor = math.exp(- (excess / lateral_threshold) ** 2)
+            # Extra suppression for adjacent-lane objects that are moving away
+            if obj_class == 0 and abs(lateral_offset) > 2.2 and obj_range_rate > 0.05:
+                excess = abs(lateral_offset) - 2.2
+                lateral_factor *= math.exp(- (excess / 1.0) ** 2)
             
             # Combined risk
-            risk_field[i] = distance_term + velocity_term
+            risk = (distance_term + velocity_term) * lateral_factor
+
+            # Pedestrian constant threat floor within 20m
+            if obj_class == 1 and distance <= 20.0:
+                risk = max(risk, self.min_pedestrian_risk * lateral_factor)
+
+            # Emphasize special objects (pedestrian, traffic light, stop sign, emergency)
+            if obj_class in (1, 2, 3, 4):
+                risk *= 2.0
+
+            risk_field[i] = risk
             
             if self.debug and risk_field[i] > 0.1:
                 angle_deg = np.degrees(boundary_point['angle'])
@@ -374,6 +614,9 @@ class BoundaryRiskEstimator:
         for i, (risk, boundary_point) in enumerate(zip(risk_field, polar_boundary)):
             angle = boundary_point['angle']
             original_distance = boundary_point['distance']
+            lateral_offset = boundary_point.get('lateral_offset')
+            if lateral_offset is None:
+                continue
             
             if risk <= self.tau:
                 # Risk is already acceptable, use original distance
@@ -392,7 +635,17 @@ class BoundaryRiskEstimator:
                     test_distance = max(safe_distance, 0.1)
                     distance_term = self.alpha * weights['m_O'] * (test_distance ** self.k)
                     velocity_term = self.beta * weights['m_D'] * boundary_point['radial_velocity'] * (test_distance ** (self.k + 1))
-                    test_risk = distance_term + velocity_term
+
+                    test_lateral = lateral_offset
+                    if original_distance > 1e-3:
+                        test_lateral = lateral_offset * (test_distance / original_distance)
+                    lateral_factor = 1.0
+                    if self.lateral_risk_threshold > 0:
+                        excess = max(0.0, abs(test_lateral) - self.lateral_risk_threshold)
+                        if excess > 0:
+                            lateral_factor = math.exp(- (excess / self.lateral_risk_threshold) ** 2)
+
+                    test_risk = (distance_term + velocity_term) * lateral_factor
                     
                     if test_risk <= self.tau:
                         break
@@ -428,12 +681,12 @@ class BoundaryRiskEstimator:
         # Find the boundary point with maximum risk
         max_risk_boundary = polar_boundary[max_risk_idx]
         
-        # Risk level classification
-        if max_risk >= 0.8:
+        # Risk level classification (aligned with alert thresholds)
+        if max_risk >= 40.0:
             risk_level = "CRITICAL"
-        elif max_risk >= 0.5:
+        elif max_risk >= 20.0:
             risk_level = "WARNING"
-        elif max_risk >= 0.2:
+        elif max_risk >= 10.0:
             risk_level = "CAUTION"
         else:
             risk_level = "SAFE"
@@ -441,11 +694,18 @@ class BoundaryRiskEstimator:
         # Primary threat information
         primary_threat = None
         if max_risk_boundary['object_index'] is not None:
+            threat_class = max_risk_boundary['object_class']
             primary_threat = {
                 'direction_deg': np.degrees(max_risk_angle),
                 'distance': max_risk_boundary['distance'],
                 'radial_velocity': max_risk_boundary['radial_velocity'],
-                'object_class': max_risk_boundary['object_class'],
+                'radial_velocity_signed': max_risk_boundary.get('radial_velocity_signed'),
+                'object_class': threat_class,
+                'class_name': self.class_names.get(threat_class, f"class{threat_class}"),
+                'object_id': max_risk_boundary.get('object_id'),
+                'object_x': max_risk_boundary.get('object_x'),
+                'object_y': max_risk_boundary.get('object_y'),
+                'lateral_offset': max_risk_boundary.get('lateral_offset'),
                 'risk_contribution': max_risk
             }
         
@@ -498,7 +758,7 @@ def test_boundary_risk_estimator():
     print("Testing Boundary Risk Estimator...")
     
     # Create estimator with debug enabled
-    estimator = BoundaryRiskEstimator(angular_resolution=180, max_range=30.0)
+    estimator = BoundaryRiskEstimator(angular_resolution=10, max_range=30.0)
     estimator.set_debug(True)
     
     # Test case 1: Single vehicle ahead
