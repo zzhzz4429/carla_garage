@@ -440,9 +440,57 @@ def test_emergency_vehicle(result):
                          "SOTIF: Emergency vehicle has higher/similar risk")
 
 
+def test_sotif_intersection_emergency_red_light(result):
+    """Test 15: SOTIF emergency vehicle crossing from right at intersection."""
+    print("\n[Test 15] SOTIF - Ego through intersection, emergency vehicle runs red from right")
+
+    estimator = SOTIFRiskEstimator(
+        grid_half_size=30.0,
+        grid_resolution=1.0,
+        angular_resolution=72,
+        max_range=50.0,
+        emergency_weight=15.0
+    )
+
+    # Scenario:
+    # - Ego moves straight through intersection (+x direction)
+    # - Emergency vehicle comes from right side (+y) crossing right->left (-y)
+    # Bounding box format: [x, y, w, h, yaw_deg, speed, brake, class, id]
+    # class=4 is emergency vehicle
+    bbs = [[8.0, 6.0, 4.8, 2.2, 270.0, 20.0, 0.0, 4, 700]]
+
+    risk_field, max_risk, threat_info = estimator.calculate_boundary_risk(
+        ego_speed=12.0,
+        bounding_boxes=bbs,
+        timestamp=0.0
+    )
+
+    risk_level = threat_info.get('risk_level')
+    direction_deg = threat_info.get('max_risk_direction_deg')
+    primary = threat_info.get('primary_threat')
+    risky_directions = threat_info.get('risky_directions', 0)
+
+    print(f"  SOTIF output max_risk={max_risk:.4f}")
+    print(f"  SOTIF output risk_level={risk_level}")
+    print(f"  SOTIF output max_risk_direction_deg={direction_deg}")
+    print(f"  SOTIF output primary_threat={primary}")
+    print(f"  SOTIF output risky_directions={risky_directions}")
+
+    result.assert_true(len(risk_field) == 72, "Risk field has expected angular resolution")
+    result.assert_greater(max_risk, 0.5, "Intersection red-light emergency creates elevated risk")
+    result.assert_true(risk_level in ('CAUTION', 'WARNING', 'CRITICAL'),
+                      "Risk level indicates a crossing threat")
+    result.assert_true(isinstance(direction_deg, (float, int)),
+                      "Max risk direction is reported")
+    result.assert_true(0.0 <= float(direction_deg) <= 90.0,
+                      "Max risk direction is in front-right intersection sector")
+    result.assert_greater(float(risky_directions), 0.0,
+                         "At least one risky direction is detected")
+
+
 def test_output_format_consistency(result):
-    """Test 15: Output format consistency (both estimators should return same structure)"""
-    print("\n[Test 15] Output format consistency - both estimators return compatible structures")
+    """Test 16: Output format consistency (both estimators should return same structure)"""
+    print("\n[Test 16] Output format consistency - both estimators return compatible structures")
     
     bbs = [[10.0, 0.0, 4.5, 2.0, 0.0, 12.0, 0.0, 0, 600]]
     
@@ -498,6 +546,7 @@ def main():
     test_multi_object_scenario(result)
     test_temporal_smoothing(result)
     test_emergency_vehicle(result)
+    test_sotif_intersection_emergency_red_light(result)
     test_output_format_consistency(result)
     
     # Print summary
