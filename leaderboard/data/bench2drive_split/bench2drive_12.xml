@@ -31,7 +31,7 @@
             <scenario name="NonSignalizedJunctionLeftTurn_1" type="NonSignalizedJunctionLeftTurn">
                <trigger_point x="2773.3" y="1632.8" yaw="269.8" z="343.6"/>
                <flow_speed value="11"/>
-               <source_dist_interval from="24" to="29"/>
+               <source_dist_interval from="50" to="60"/>
             </scenario>
          </scenarios>
          <weathers>

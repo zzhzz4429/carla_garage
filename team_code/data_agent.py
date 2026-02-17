@@ -31,6 +31,7 @@ from agents.navigation.local_planner import LocalPlanner
 # Boundary risk estimators (GT-based)
 from boundary_risk_estimator import BoundaryRiskEstimator
 from sotif_risk_estimator import SOTIFRiskEstimator
+from risk_curve_plotter import RiskCurvePlotter
 
 
 def get_entry_point():
@@ -164,9 +165,26 @@ class DataAgent(AutoPilot):
     self.draw_boundary_debug = strtobool(os.environ.get('DRAW_BOUNDARY_RISK_DEBUG', 'True'))
     self.enable_relative_pos_debug = strtobool(os.environ.get('DRAW_RELATIVE_POS_DEBUG', 'False'))
     self.enable_sotif_heatmap_hud = strtobool(os.environ.get('DRAW_SOTIF_HEATMAP_HUD', 'True'))
+    self.enable_risk_curve_plot = strtobool(os.environ.get('ENABLE_RISK_CURVE_PLOT', 'False'))
     self.debug_tick_rate = strtobool(os.environ.get('DEBUG_TICK_RATE', 'False'))
     self.debug_tick_rate_freq = int(os.environ.get('DEBUG_TICK_RATE_FREQ', 30))
     self.collision_warn_log_path = os.path.join(os.getcwd(), "collision_warning_debug.txt")
+    
+    # Real-time risk curve plotter
+    self.risk_curve_plotter = None
+    if self.enable_risk_curve_plot:
+      plot_type = str(os.environ.get('RISK_CURVE_PLOT_TYPE', 'both')).strip().lower()
+      update_rate = float(os.environ.get('RISK_CURVE_UPDATE_RATE', '10.0'))
+      try:
+        self.risk_curve_plotter = RiskCurvePlotter(
+            enable=True,
+            plot_type=plot_type,
+            update_rate=update_rate
+        )
+        print(f'Risk curve plotter enabled (type={plot_type}, rate={update_rate}Hz)')
+      except Exception as e:
+        print(f'⚠️ Failed to initialize risk curve plotter: {e}')
+        self.risk_curve_plotter = None
 
     if self.use_boundary_risk:
       risk_estimator_type = str(os.environ.get('RISK_ESTIMATOR_TYPE', 'sotif')).strip().lower()
@@ -881,28 +899,40 @@ class DataAgent(AutoPilot):
     if self.last_boundary_risk_info is None:
       return None
 
-    heatmap = self.last_boundary_risk_info.get('heatmap')
-    if heatmap is None:
-      return None
-    if not isinstance(heatmap, np.ndarray) or heatmap.ndim != 2 or heatmap.size == 0:
+    heatmap_r = self.last_boundary_risk_info.get('heatmap')
+    heatmap_c = self.last_boundary_risk_info.get('heatmap_C')
+
+    def _normalize_map(arr):
+      if arr is None or not isinstance(arr, np.ndarray) or arr.ndim != 2 or arr.size == 0:
+        return None
+      max_val = float(np.max(arr))
+      if max_val <= 1e-8:
+        return np.zeros_like(arr, dtype=np.float32)
+      ref = max(1e-8, float(np.percentile(arr, 99.0)))
+      return np.clip(arr / ref, 0.0, 1.0).astype(np.float32)
+
+    norm_r = _normalize_map(heatmap_r)
+    norm_c = _normalize_map(heatmap_c)
+    if norm_r is None and norm_c is None:
       return None
 
     try:
-      # Convert grid (x forward, y right) to image (up forward, right right).
-      display_map = np.flipud(heatmap.T)
-
-      max_val = float(np.max(display_map))
-      if max_val <= 1e-8:
-        normalized = np.zeros_like(display_map, dtype=np.float32)
+      # Blend cost map (directional localization) with final risk map
+      # to avoid front-bias from P(x,y) while preserving threat severity.
+      if norm_r is not None and norm_c is not None:
+        normalized = 0.4 * norm_r + 0.6 * norm_c
+      elif norm_c is not None:
+        normalized = norm_c
       else:
-        # Robust scaling to avoid one hot pixel dominating the panel.
-        ref = max(1e-8, float(np.percentile(display_map, 99.0)))
-        normalized = np.clip(display_map / ref, 0.0, 1.0).astype(np.float32)
+        normalized = norm_r
+
+      # Convert grid (x forward, y right) to image (up forward, right right).
+      display_map = np.flipud(normalized.T)
 
       # Simple high-contrast "thermal" palette.
-      r = (255.0 * normalized).astype(np.uint8)
-      g = (200.0 * (1.0 - normalized)).astype(np.uint8)
-      b = (45.0 * (1.0 - normalized)).astype(np.uint8)
+      r = (255.0 * display_map).astype(np.uint8)
+      g = (200.0 * (1.0 - display_map)).astype(np.uint8)
+      b = (45.0 * (1.0 - display_map)).astype(np.uint8)
       rgb = np.stack((r, g, b), axis=2)
 
       panel = pygame.Surface((size, size), pygame.SRCALPHA).convert_alpha()
@@ -930,8 +960,11 @@ class DataAgent(AutoPilot):
 
       if pygame.font.get_init():
         font = self._font_mono or pygame.font.SysFont('monospace', 16)
-        title = font.render("SOTIF P*C", True, (255, 255, 255))
+        title = font.render("SOTIF C+R", True, (255, 255, 255))
         panel.blit(title, (14, 2))
+        panel.blit(font.render("L", True, (200, 200, 200)), (14, 14 + map_size // 2))
+        panel.blit(font.render("R", True, (200, 200, 200)), (12 + map_size - 12, 14 + map_size // 2))
+        panel.blit(font.render("F", True, (200, 200, 200)), (12 + map_size // 2 - 4, 14))
 
       return panel
     except Exception as exc:  # pylint: disable=broad-except
@@ -1137,6 +1170,19 @@ class DataAgent(AutoPilot):
           self.draw_boundary_risk_debug()
         if self.enable_relative_pos_debug:
           self.draw_relative_pos_debug()
+        
+        # Update real-time risk curve plot
+        if self.risk_curve_plotter is not None and self.risk_curve_plotter.is_enabled():
+          if self.last_boundary_risk_field is not None and self.boundary_risk_estimator is not None:
+            angles = getattr(self.boundary_risk_estimator, 'angles', None)
+            if angles is not None and len(angles) == len(self.last_boundary_risk_field):
+              max_risk = float(np.max(self.last_boundary_risk_field)) if self.last_boundary_risk_field.size > 0 else 0.0
+              self.risk_curve_plotter.update(
+                  self.last_boundary_risk_field,
+                  angles,
+                  max_risk,
+                  self.last_boundary_risk_info
+              )
 
     if self.step % self.config.data_save_freq == 0:
       if self.save_path is not None and self.datagen:
@@ -1255,6 +1301,10 @@ class DataAgent(AutoPilot):
   def destroy(self, results=None):
     torch.cuda.empty_cache()
 
+    # Close risk curve plotter
+    if self.risk_curve_plotter is not None:
+      self.risk_curve_plotter.close()
+      self.risk_curve_plotter = None
 
     if results is not None and self.save_path is not None:
       with gzip.open(os.path.join(self.save_path, 'results.json.gz'), 'wt', encoding='utf-8') as f:

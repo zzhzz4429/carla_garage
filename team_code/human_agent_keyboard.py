@@ -261,10 +261,10 @@ class HumanAgentSteeringWheel(AutonomousAgent):
 		self.last_ego_speed = 0.0
 		self.last_boundary_risk_field = None
 		self.last_boundary_risk_info = None
-		self.enable_post_risk_plotting = strtobool(os.environ.get('ENABLE_POST_RISK_PLOTTING', 'True'))
+		self.enable_post_risk_plotting = strtobool(os.environ.get('ENABLE_POST_RISK_PLOTTING', 'False'))
 		self.risk_plot_output_dir = os.environ.get('RISK_PLOT_OUTPUT_DIR', 'risk_post_plots')
 		self.risk_history_maxlen = max(1000, int(os.environ.get('RISK_HISTORY_MAXLEN', '36000')))
-		self.enable_emergency_bbox_recording = strtobool(os.environ.get('ENABLE_EMERGENCY_BBOX_RECORDING', 'True'))
+		self.enable_emergency_bbox_recording = strtobool(os.environ.get('ENABLE_EMERGENCY_BBOX_RECORDING', 'False'))
 		self._emergency_bbox_records = []
 		self._emergency_presence_frames = 0
 		self._risk_history = {
@@ -298,7 +298,7 @@ class HumanAgentSteeringWheel(AutonomousAgent):
 		self._last_sotif_hud_frame = -1
 		self._sotif_hud_panel = None
 		self.boundary_risk_estimator = None
-		risk_estimator_type = str(os.environ.get('RISK_ESTIMATOR_TYPE', 'sotif')).strip().lower()
+		risk_estimator_type = str(os.environ.get('RISK_ESTIMATOR_TYPE', 'boundary')).strip().lower()
 		
 		# Real-time risk curve plotter
 		self.risk_curve_plotter = None
@@ -838,7 +838,8 @@ class HumanAgentSteeringWheel(AutonomousAgent):
 
 		if self.sotif_hud_downsample > 1:
 			normalized = normalized[::self.sotif_hud_downsample, ::self.sotif_hud_downsample]
-		display_map = np.flipud(normalized.T)
+		# display_map = np.flipud(normalized.T)
+		display_map = np.flipud(np.fliplr(normalized.T))
 		r = (255.0 * display_map).astype(np.uint8)
 		g = (200.0 * (1.0 - display_map)).astype(np.uint8)
 		b = (45.0 * (1.0 - display_map)).astype(np.uint8)

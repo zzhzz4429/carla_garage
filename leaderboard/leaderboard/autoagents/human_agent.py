@@ -111,8 +111,8 @@ class HumanAgent(AutonomousAgent):
         self.camera_width = 1280
         self.camera_height = 720
         self._side_scale = 0.3
-        self._left_mirror = False
-        self._right_mirror = False
+        self._left_mirror = True
+        self._right_mirror = True
 
         self._hic = HumanInterface(
             self.camera_width,

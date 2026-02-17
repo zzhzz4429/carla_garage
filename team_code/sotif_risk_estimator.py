@@ -361,8 +361,12 @@ class SOTIFRiskEstimator:
         sigma_lat = max(self.ego_width, 1.5)  # lateral spread ≈ lane width
 
         # 2-D Gaussian probability centred on (s_la, 0)
+        # Use wider lateral spread for intersection scenarios (crossing vehicles)
+        # Base lateral spread is lane width, but expand for intersection awareness
+        sigma_lat_expanded = max(sigma_lat * 2.0, 6.0)  # At least 6m to catch crossing vehicles
+        
         P = np.exp(-0.5 * ((self.grid_x - s_la) / sigma_long) ** 2
-                   - 0.5 * (self.grid_y / sigma_lat) ** 2)
+                   - 0.5 * (self.grid_y / sigma_lat_expanded) ** 2)
 
         # Amplitude scales with speed² (kinetic energy proxy)
         amplitude = self.p_coeff * v ** 2
@@ -448,10 +452,24 @@ class SOTIFRiskEstimator:
 
             # ── Presence floor for static / very slow nearby objects ──
             # A parked car 3 m ahead is still a hazard even if v_approach ≈ 0.
+            # Also handle crossing vehicles (e.g., left-side red-light runners)
+            # where v_approach might be low but the vehicle is still a threat.
             if cost < 1e-3:
-                if dist < 15.0:
-                    # Small proximity cost ∝ 1/d, so it doesn't dominate
-                    cost = w_sem * m_k * 0.5 / max(dist, 1.0)
+                # Check if object is in a potentially dangerous position
+                # (close enough or crossing path)
+                abs_y = abs(obj['y'])
+                is_crossing = abs_y > 2.0 and abs_y < 10.0  # Lateral crossing zone
+                is_nearby = dist < 25.0  # Increased from 15.0 to catch crossing vehicles
+                
+                if is_nearby or (is_crossing and dist < 40.0):
+                    # For crossing vehicles, use a distance-based cost that
+                    # doesn't require high v_approach
+                    if is_crossing:
+                        # Crossing vehicles get higher presence floor
+                        cost = w_sem * m_k * 1.0 / max(dist, 1.0)
+                    else:
+                        # Static/slow nearby objects
+                        cost = w_sem * m_k * 0.5 / max(dist, 1.0)
                 else:
                     continue
 

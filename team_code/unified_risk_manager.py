@@ -38,9 +38,9 @@ class UnifiedRiskManager:
         # Driver state risk mapping
         self.driver_state_risks = {
             'safe_driving': 0.0,    # No internal risk
-            'sleepy': 0.7,          # High internal risk
-            'reaching_back': 0.5,   # Medium internal risk  
-            'using_phone': 0.8      # Very high internal risk
+            'sleepy': 0.6,          # High internal risk
+            'reaching_back': 0.8,   # Medium internal risk  
+            'using_phone': 0.7   # Very high internal risk
         }
         
         # Risk thresholds for different alert levels

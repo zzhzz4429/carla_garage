@@ -71,7 +71,7 @@
       </waypoints>
       <scenarios>
          <scenario name="DynamicObjectCrossing_1" type="DynamicObjectCrossing">
-            <distance value="50"/>
+            <distance value="80"/>
             <direction value="right"/>
             <blocker_model value="static.prop.container"/>
             <crossing_angle value="4"/>
@@ -79,8 +79,8 @@
          </scenario>
       </scenarios>
       <weathers>
-         <weather cloudiness="40.0" fog_density="7.0" precipitation="100.0" precipitation_deposits="90.0" route_percentage="0" sun_altitude_angle="0.0" sun_azimuth_angle="-1.0" wetness="0.0" wind_intensity="100.0"/>
-         <weather cloudiness="40.0" fog_density="7.0" precipitation="100.0" precipitation_deposits="90.0" route_percentage="100" sun_altitude_angle="0.0" sun_azimuth_angle="-1.0" wetness="0.0" wind_intensity="100.0"/>
+         <weather cloudiness="10.0" fog_density="0.0" precipitation="0.0" precipitation_deposits="0.0" route_percentage="0" sun_altitude_angle="45.0" sun_azimuth_angle="-1.0" wetness="0.0" wind_intensity="0.0"/>
+         <weather cloudiness="10.0" fog_density="0.0" precipitation="0.0" precipitation_deposits="0.0" route_percentage="100" sun_altitude_angle="45.0" sun_azimuth_angle="-1.0" wetness="0.0" wind_intensity="0.0"/>
       </weathers>
    </route>
    </routes>

@@ -326,6 +326,18 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
       'critical_min_time': None,
       'collision_time': None,
     }
+    # EV-specific tracking (class 4)
+    self.ev_metrics = {
+      'min_distance': float('inf'),
+      'peak_risk': 0.0,
+      'first_alert_time': None,
+      'alert_count': 0,
+      'last_alert_step': -1,
+      'min_rear_gap_left': float('inf'),
+      'min_rear_gap_right': float('inf'),
+      'rear_vehicle_count_left': 0,
+      'rear_vehicle_count_right': 0,
+    }
     self.collision_distance_threshold = float(os.environ.get('BOUNDARY_COLLISION_DISTANCE', '0.5'))
     self.near_miss_distance_threshold = float(os.environ.get('BOUNDARY_NEAR_MISS_DISTANCE', '3.0'))
     self.log_boundary_data = strtobool(os.environ.get('LOG_BOUNDARY_DATA', 'True'))
@@ -869,9 +881,41 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
 
       max_risk = max(1e-3, float(np.max(self.last_boundary_risk_field)))
 
-      for angle_local, risk in zip(angles, self.last_boundary_risk_field):
+      # Optional object info from the last estimator run (per-sector classes)
+      polar_boundary = getattr(self.boundary_risk_estimator, 'last_polar_boundary', None)
+      has_class_info = polar_boundary is not None and len(polar_boundary) == len(self.last_boundary_risk_field)
+
+      # Fixed colors per unified class (vehicle, pedestrian, traffic light, stop sign, emergency)
+      # High-contrast class colors (easy to distinguish in debug view)
+      class_colors = {
+          0: (200, 200, 200),  # vehicle: light gray
+          1: (50, 140, 255),   # pedestrian: vivid blue
+          2: (200, 60, 220),   # traffic light: magenta
+          3: (255, 170, 40),   # stop sign: orange
+          4: (255, 50, 50),    # emergency: bright red
+      }
+
+      for idx, (angle_local, risk) in enumerate(zip(angles, self.last_boundary_risk_field)):
         normalized = max(0.0, min(1.0, risk / max_risk))
-        color_tuple = self._risk_to_color(normalized)
+        risk_color = self._risk_to_color(normalized)
+
+        # Use strong class color; modulate brightness by risk so severity is still visible
+        if has_class_info:
+          obj_class = polar_boundary[idx].get('object_class')
+          base_tuple = class_colors.get(obj_class)
+        else:
+          base_tuple = None
+
+        if base_tuple:
+          brightness = 0.35 + 0.65 * normalized  # keep type visible, brighten with risk
+          color_tuple = (
+              int(base_tuple[0] * brightness),
+              int(base_tuple[1] * brightness),
+              int(base_tuple[2] * brightness),
+          )
+        else:
+          color_tuple = risk_color
+
         color = carla.Color(r=color_tuple[0], g=color_tuple[1], b=color_tuple[2])
 
         # Length transitions smoothly from short (low risk) to long (high risk)
@@ -1374,6 +1418,32 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
       # NEW: Log boundary risk data for plotting
       if self.log_boundary_data and boundary_risk_info:
         self.log_boundary_risk_data(timestamp, speed, boundary_risk_info)
+
+        # EV-specific metrics (class 4: emergency vehicle)
+        primary_threat = boundary_risk_info.get('primary_threat') or {}
+        threat_class = primary_threat.get('object_class')
+        threat_dist = primary_threat.get('distance')
+        if threat_class == 4:
+          if threat_dist is not None:
+            self.ev_metrics['min_distance'] = min(self.ev_metrics['min_distance'], threat_dist)
+          self.ev_metrics['peak_risk'] = max(self.ev_metrics['peak_risk'], boundary_risk_info.get('max_risk', 0.0))
+          # Alert accounting for EV (only once per step)
+          level = str(boundary_risk_info.get('risk_level', 'SAFE')).upper()
+          if level != 'SAFE' and self.step != self.ev_metrics['last_alert_step']:
+            self.ev_metrics['alert_count'] += 1
+            self.ev_metrics['last_alert_step'] = self.step
+            if self.ev_metrics['first_alert_time'] is None:
+              self.ev_metrics['first_alert_time'] = timestamp
+          # Rear-gap logging (position-only, per frame with EV threat)
+          if bbs_vehicle_coordinate_system is not None:
+            rear_gaps = self._compute_rear_gaps(bbs_vehicle_coordinate_system)
+            if rear_gaps:
+              if rear_gaps.get('left_min') is not None:
+                self.ev_metrics['min_rear_gap_left'] = min(self.ev_metrics['min_rear_gap_left'], rear_gaps['left_min'])
+              if rear_gaps.get('right_min') is not None:
+                self.ev_metrics['min_rear_gap_right'] = min(self.ev_metrics['min_rear_gap_right'], rear_gaps['right_min'])
+              self.ev_metrics['rear_vehicle_count_left'] = max(self.ev_metrics['rear_vehicle_count_left'], rear_gaps.get('left_count', 0))
+              self.ev_metrics['rear_vehicle_count_right'] = max(self.ev_metrics['rear_vehicle_count_right'], rear_gaps.get('right_count', 0))
       
       # Log boundary risk information
       if self.step % 50 == 0:  # Log every 50 steps to avoid spam
@@ -2021,6 +2091,71 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
       json.dump(metrics, f, indent=2)
     print(f"📄 Boundary run metrics saved: {filename}")
 
+  def _save_ev_run_metrics(self):
+    """Persist EV-specific metrics (emergency vehicle interactions)."""
+    if self.save_path is not None:
+      out_dir = self.save_path
+    else:
+      out_dir = pathlib.Path(os.getcwd()) / "boundary_metrics"
+      out_dir.mkdir(parents=True, exist_ok=True)
+
+    out_dir_str = str(out_dir)
+    metrics = {
+      "min_distance": None if self.ev_metrics['min_distance'] == float('inf') else self.ev_metrics['min_distance'],
+      "peak_risk": self.ev_metrics['peak_risk'],
+      "first_alert_time": self.ev_metrics['first_alert_time'],
+      "alert_count": self.ev_metrics['alert_count'],
+      "min_rear_gap_left": None if self.ev_metrics['min_rear_gap_left'] == float('inf') else self.ev_metrics['min_rear_gap_left'],
+      "min_rear_gap_right": None if self.ev_metrics['min_rear_gap_right'] == float('inf') else self.ev_metrics['min_rear_gap_right'],
+      "rear_vehicle_count_left": self.ev_metrics['rear_vehicle_count_left'],
+      "rear_vehicle_count_right": self.ev_metrics['rear_vehicle_count_right'],
+      "frames_logged": len(self.boundary_risk_data.get('timestamps', []))
+    }
+
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(out_dir_str, f"ev_run_metrics_{timestamp_str}.json")
+    with open(filename, "w", encoding="utf-8") as f:
+      json.dump(metrics, f, indent=2)
+    print(f"📄 EV run metrics saved: {filename}")
+
+  def _compute_rear_gaps(self, bbs_vehicle_coordinate_system, lane_width: float = 3.5, lateral_tol: float = 1.2):
+    """
+    Compute rear gaps for left/right target lanes based on bounding boxes behind ego.
+    Assumes CARLA coords (x forward, y right). Left lane center at -lane_width, right at +lane_width.
+    Only considers class 0 (vehicles).
+    """
+    left_center = -lane_width
+    right_center = lane_width
+    ego_length = getattr(self.boundary_risk_estimator, 'ego_length', 4.5)
+
+    left_gaps = []
+    right_gaps = []
+
+    for bb in bbs_vehicle_coordinate_system:
+      if len(bb) < 4:
+        continue
+      x, y, w, _h = bb[0], bb[1], bb[2], bb[3] if len(bb) > 3 else 0.0
+      obj_class = int(bb[7]) if len(bb) > 7 else 0
+      if obj_class != 0:  # vehicles only for rear-gap check
+        continue
+      if x >= 0:
+        continue  # only behind ego
+
+      gap = max(0.0, abs(x) - (ego_length / 2.0 + w / 2.0))
+
+      if abs(y - left_center) < lateral_tol:
+        left_gaps.append(gap)
+      if abs(y - right_center) < lateral_tol:
+        right_gaps.append(gap)
+
+    result = {
+      'left_min': min(left_gaps) if left_gaps else None,
+      'right_min': min(right_gaps) if right_gaps else None,
+      'left_count': len(left_gaps),
+      'right_count': len(right_gaps),
+    }
+    return result
+
   def destroy(self, results=None):  # pylint: disable=locally-disabled, unused-argument
     """
     Gets called after a route finished.
@@ -2033,6 +2168,10 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
         self._save_boundary_run_metrics()
       except Exception as e:
         print(f"⚠️ Error saving boundary run metrics: {e}")
+      try:
+        self._save_ev_run_metrics()
+      except Exception as e:
+        print(f"⚠️ Error saving EV run metrics: {e}")
 
     # NEW: Generate boundary risk plots before cleanup
     if self.use_boundary_risk and self.log_boundary_data:

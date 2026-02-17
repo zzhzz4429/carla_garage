@@ -8,7 +8,7 @@ class SafetyEvaluator:
         self.config = config
         # TTC thresholds
         self.critical_ttc = 2.5  # seconds - critical if TTC < 2s
-        self.warning_ttc = 5.0   # seconds - warning if TTC < 8s
+        self.warning_ttc = 3.0   # seconds - warning if TTC < 8s
         
         # Risk assessment thresholds
         self.critical_distance = 3.0  # meters - critical if distance < 5m
@@ -485,11 +485,12 @@ class SafetyEvaluator:
             if bb[0] <= 0 or bb[7] not in [0, 1, 4]:  # Not in front or not relevant object type
                 continue
                 
-            # Check if object is in ego lane (within ±half lane width)
-            if abs(bb[1]) > self.lane_width / 2:
-                continue
-                
             obj_class = int(bb[7])
+            
+            # Check if object is in ego lane (within ±half lane width)
+            # Exception: Always include pedestrians regardless of lateral position
+            if obj_class != 1 and abs(bb[1]) > self.lane_width / 2:
+                continue
             class_name = class_names.get(obj_class, f"class{obj_class}")
             
             # Calculate actual safe distance (compensated for vehicle dimensions)

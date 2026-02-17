@@ -209,8 +209,8 @@ class BackgroundBehavior(AtomicBehavior):
         self._road_dict = {}  # Dictionary lane key -> actor source
         self._road_checker_index = 0
 
-        self._road_front_vehicles = 2  # Amount of vehicles in front of the ego
-        self._road_back_vehicles = 2  # Amount of vehicles behind the ego
+        self._road_front_vehicles = 0 # Amount of vehicles in front of the ego
+        self._road_back_vehicles = 0 # Amount of vehicles behind the ego
         self._radius_increase_ratio = 1.7  # Meters the radius increases per m/s of the ego
 
         self._base_junction_detection = 30
@@ -234,7 +234,7 @@ class BackgroundBehavior(AtomicBehavior):
         self._active_junctions = []  # List of all the active junctions
 
         self._junction_sources_dist = 40  # Distance from the entry sources to the junction [m]
-        self._junction_sources_max_actors = 6  # Maximum vehicles alive at the same time per source
+        self._junction_sources_max_actors = 5  # Maximum vehicles alive at the same time per source
         self._junction_spawn_dist = 15  # Distance between spawned vehicles [m]
         self._junction_minimum_source_dist = 15  # Minimum distance between sources and their junction
 

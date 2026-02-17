@@ -165,11 +165,11 @@ class DynamicObjectCrossing(BasicScenario):
         self._blocker_transform = None
         self._collision_wp = None
 
-        self._adversary_speed = 2.0  # Speed of the adversary [m/s]
+        self._adversary_speed = 1.0          # Slower pedestrian/cyclist
         self._crossing_angle = get_value_parameter(config, 'crossing_angle', float, 0)
-        self._reaction_time = 2.1  # Time the agent has to react to avoid the collision [s]
-        self._reaction_time += 0.1 * floor(self._crossing_angle / 5)
-        self._min_trigger_dist = 6.0  # Min distance to the collision location that triggers the adversary [m]
+        self._reaction_time = 5.0            # 5 seconds reaction time
+        self._reaction_time += 0.1 * floor(self._crossing_angle / 5)  # Angle adjustment
+        self._min_trigger_dist = 20.0        # 20 meters trigger distance
         self._ego_end_distance = 40
         self.timeout = timeout
 

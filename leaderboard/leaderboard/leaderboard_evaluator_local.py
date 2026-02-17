@@ -56,7 +56,7 @@ class LeaderboardEvaluator(object):
 
     # Tunable parameters
     client_timeout = 10.0  # in seconds
-    frame_rate = 20.0      # in Hz
+    frame_rate = 30.0      # in Hz
 
     def __init__(self, args, statistics_manager):
         """
@@ -477,12 +477,13 @@ def main():
                         help='Execute a specific set of routes')
     parser.add_argument('--repetitions', type=int, default=1,
                         help='Number of repetitions per route.')
-
     # agent-related options
     parser.add_argument("-a", "--agent", type=str,
-                        help="Path to Agent's py file to evaluate", required=True)
+                        help="Path to Agent's py file to evaluate", required=True, default="")
     parser.add_argument("--agent-config", type=str,
-                        help="Path to Agent's configuration file", default="")
+                        help="Path to Agent's configuration file", default="/home/ascc304/carla_garage/pretrained_models/all_towns")
+    # parser.add_argument("--agent-config", type=str,
+    #                     help="Path to Agent's configuration file")
 
     parser.add_argument("--track", type=str, default='SENSORS',
                         help="Participation track: SENSORS, MAP")

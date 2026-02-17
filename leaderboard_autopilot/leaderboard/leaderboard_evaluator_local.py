@@ -489,7 +489,7 @@ def main():
     parser.add_argument("--agent-config", type=str,
                         help="Path to Agent's configuration file", default="")
 
-    parser.add_argument("--track", type=str, default='SENSORS',
+    parser.add_argument("--track", type=str, default='MAP',
                         help="Participation track: SENSORS, MAP")
     parser.add_argument('--resume', type=int, default=False,
                         help='Resume execution from last checkpoint?')

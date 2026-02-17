@@ -60,9 +60,11 @@ class PedestrianCrossing(BasicScenario):
         self._reference_waypoint = self._wmap.get_waypoint(self._trigger_location)
         self._rng = CarlaDataProvider.get_random_seed()
 
-        self._adversary_speed = 1.3  # Speed of the adversary [m/s]
-        self._reaction_time = 3.5  # Time the agent has to react to avoid the collision [s]
-        self._min_trigger_dist = 12.0  # Min distance to the collision location that triggers the adversary [m]
+        # More conservative timing for ADAS testing
+        self._reaction_time = 6.0     # 6 seconds reaction time
+        self._min_trigger_dist = 25.0 # 25 meters trigger distance
+        self._adversary_speed = 1.0   # Slower base speed
+
         self._ego_end_distance = 40
         self.timeout = timeout
 
@@ -73,8 +75,8 @@ class PedestrianCrossing(BasicScenario):
         ]
 
         for walker_data in self._walker_data:
-            walker_data['idle_time'] = self._rng.uniform(0, 1.5)
-            walker_data['speed'] = self._rng.uniform(1.3, 2.0)
+            walker_data['idle_time'] = self._rng.uniform(0, 0.3)    # Quick start
+            walker_data['speed'] = self._rng.uniform(0.8, 1.2)     # Slower crossing
 
         super().__init__("PedestrianCrossing",
                           ego_vehicles,

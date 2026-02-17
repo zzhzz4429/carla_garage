@@ -77,6 +77,7 @@ class HumanInterface(object):
 		self._height = height
 		self.dim = (width, height)
 		self._scale = side_scale
+		self._display_scale = 2
 		self._surface = None
 		self.camera_idx = 0
 
@@ -86,7 +87,10 @@ class HumanInterface(object):
 		pygame.init()
 		pygame.font.init()
 		self._clock = pygame.time.Clock()
-		self._display = pygame.display.set_mode((self._width, self._height), pygame.HWSURFACE | pygame.DOUBLEBUF)
+		
+		scaled_width = int(self._width * self._display_scale)
+		scaled_height = int(self._height * self._display_scale)
+		self._display = pygame.display.set_mode((scaled_width, scaled_height), pygame.HWSURFACE | pygame.DOUBLEBUF)
 		pygame.display.set_caption("Human Agent")
 
 		font = pygame.font.Font(pygame.font.get_default_font(), 20)
@@ -151,15 +155,24 @@ class HumanInterface(object):
 			right_surface = pygame.surfarray.make_surface(image_right.swapaxes(0, 1))
 			self._surface.blit(right_surface, ((1 - self._scale) * self._width, (1 - self._scale) * self._height))
 
-		# Display image
+		# Display image with scaling
 		if self._surface is not None:
-			self._display.blit(self._surface, (0, 0))
+			# Scale the surface to the display size
+			scaled_surface = pygame.transform.scale(
+				self._surface, 
+				(int(self._width * self._display_scale), 
+				 int(self._height * self._display_scale))
+			)
+			self._display.blit(scaled_surface, (0, 0))
 
 		if self._show_info:
-			surface_height = (1 - self._scale) * self._height if self._left_mirror else self._height
+			# Scale info surface
+			surface_height = int((1 - self._scale) * self._height * self._display_scale) if self._left_mirror else int(self._height * self._display_scale)
 			info_surface = pygame.Surface((220, surface_height))
 			info_surface.set_alpha(100)
 			self._display.blit(info_surface, (0, 0))
+			
+			# Adjust v_offset for scaled display
 			v_offset = 4
 			bar_h_offset = 100
 			bar_width = 106
@@ -229,11 +242,11 @@ class HumanAgentSteeringWheel(AutonomousAgent):
 		self.track = Track.SENSORS
 
 		self.agent_engaged = False
-		self.camera_width = 1280
-		self.camera_height = 720
+		self.camera_width = 1024
+		self.camera_height = 512
 		self._side_scale = 0.3
-		self._left_mirror = False
-		self._right_mirror = False
+		self._left_mirror = True
+		self._right_mirror = True
 
 		self._hic = HumanInterface(
 			self.camera_width,
@@ -270,23 +283,23 @@ class HumanAgentSteeringWheel(AutonomousAgent):
 			# {'type': 'sensor.camera.rgb', 'x': 0.7, 'y': 0.0, 'z': 1.60, 'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
 			#  'width': self.camera_width, 'height': self.camera_height, 'fov': 100, 'id': 'Center_0'},
 
-			{'type': 'sensor.camera.rgb', 'x': -1.5, 'y': 0.0, 'z': 2.6, 'roll': 0.0, 'pitch': -15.0, 'yaw': 0.0,
-			 'width': self.camera_width, 'height': self.camera_height, 'fov': 100, 'id': 'Center_0'},
+			{'type': 'sensor.camera.rgb', 'x': -1.5, 'y': 0.0, 'z': 2.0, 'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
+			 'width': self.camera_width, 'height': self.camera_height, 'fov': 110, 'id': 'Center_0'},
 
 			{'type': 'sensor.speedometer', 'id': 'speedometer'}
 		]
 
-		# if self._left_mirror:
-		#     sensors.append(
-		#         {'type': 'sensor.camera.rgb', 'x': 0.7, 'y': -1.0, 'z': 1, 'roll': 0.0, 'pitch': 0.0, 'yaw': 210.0,
-		#          'width': self.camera_width * self._side_scale, 'height': self.camera_height * self._side_scale,
-		#          'fov': 100, 'id': 'Left'})
-		#
-		# if self._right_mirror:
-		#     sensors.append(
-		#         {'type': 'sensor.camera.rgb', 'x': 0.7, 'y': 1.0, 'z': 1, 'roll': 0.0, 'pitch': 0.0, 'yaw': 150.0,
-		#          'width': self.camera_width * self._side_scale, 'height': self.camera_height * self._side_scale,
-		#          'fov': 100, 'id': 'Right'})
+		if self._left_mirror:
+		    sensors.append(
+		        {'type': 'sensor.camera.rgb', 'x': 0.7, 'y': -1.0, 'z': 1, 'roll': 0.0, 'pitch': 0.0, 'yaw': 210.0,
+		         'width': self.camera_width * self._side_scale, 'height': self.camera_height * self._side_scale,
+		         'fov': 100, 'id': 'Left'})
+		
+		if self._right_mirror:
+		    sensors.append(
+		        {'type': 'sensor.camera.rgb', 'x': 0.7, 'y': 1.0, 'z': 1, 'roll': 0.0, 'pitch': 0.0, 'yaw': 150.0,
+		         'width': self.camera_width * self._side_scale, 'height': self.camera_height * self._side_scale,
+		         'fov': 100, 'id': 'Right'})
 
 		return sensors
 

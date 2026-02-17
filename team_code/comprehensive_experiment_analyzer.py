@@ -216,6 +216,22 @@ class ComprehensiveExperimentAnalyzer:
         print(f"   Scenarios: {sorted(self.df['scenario_clean'].unique())}")
         print(f"   Conditions: {sorted(self.df['condition_clean'].unique())}")
         print(f"   Participants: {sorted(self.df['participant'].unique())}")
+        
+        # Debug: Show data availability for key metrics
+        print(f"\n📊 Data availability:")
+        key_metrics = ['safety_margin', 'minimum_distance', 'safety_score', 'collision']
+        for metric in key_metrics:
+            if metric in self.df.columns:
+                non_null_count = self.df[metric].notna().sum()
+                print(f"   {metric}: {non_null_count}/{len(self.df)} records ({non_null_count/len(self.df)*100:.1f}%)")
+                if non_null_count > 0:
+                    print(f"      Range: {self.df[metric].min():.2f} - {self.df[metric].max():.2f}")
+        
+        # Show sample of data
+        print(f"\n📋 Sample data (first 3 rows):")
+        display_cols = ['condition_clean', 'scenario_clean', 'participant', 'safety_margin', 'minimum_distance', 'collision']
+        available_cols = [col for col in display_cols if col in self.df.columns]
+        print(self.df[available_cols].head(3).to_string())
     
     def cross_condition_analysis(self):
         """Analyze differences across experimental conditions"""
@@ -376,128 +392,165 @@ class ComprehensiveExperimentAnalyzer:
         return (group1.mean() - group2.mean()) / pooled_std
     
     def create_comprehensive_visualizations(self, save_plots: bool = True):
-        """Create comprehensive visualizations for all analyses"""
+        """Create IEEE 2-column format visualizations focusing on key insights"""
         print("\n" + "="*70)
-        print("GENERATING COMPREHENSIVE VISUALIZATIONS")
+        print("GENERATING IEEE FORMAT VISUALIZATIONS")
         print("="*70)
         
+        # Set IEEE paper style
         plt.style.use('default')
+        plt.rcParams.update({
+            'font.size': 10,
+            'font.family': 'serif',
+            'axes.labelsize': 10,
+            'axes.titlesize': 11,
+            'xtick.labelsize': 9,
+            'ytick.labelsize': 9,
+            'legend.fontsize': 9,
+            'figure.titlesize': 12
+        })
+        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        saved_files = []
         
-        # 1. Multi-dimensional overview
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-        fig.suptitle('Comprehensive Experiment Analysis Overview', fontsize=16)
+        # Figure 1: Cross-Condition Performance Comparison (IEEE 2-column width)
+        fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.5, 3.5))
         
-        # Safety margin by condition
-        self.df.boxplot(column='safety_margin', by='condition_clean', ax=axes[0,0])
-        axes[0,0].set_title('Safety Margin by Condition')
-        axes[0,0].set_xlabel('Condition')
-        axes[0,0].set_ylabel('Safety Margin (m)')
+        # Check available columns and use alternative metrics if safety_margin is missing
+        print(f"📊 Available columns: {list(self.df.columns)}")
+        print(f"📊 Safety margin data availability: {self.df['safety_margin'].notna().sum()} / {len(self.df)} records")
         
-        # Safety margin by scenario
-        self.df.boxplot(column='safety_margin', by='scenario_clean', ax=axes[0,1])
-        axes[0,1].set_title('Safety Margin by Scenario')
-        axes[0,1].set_xlabel('Scenario')
+        # Safety Margin by Condition (or use minimum_distance as fallback)
+        condition_order = ['Internal Only', 'Fusion', 'External Only']
+        available_conditions = [cond for cond in condition_order if cond in self.df['condition_clean'].unique()]
         
-        # Safety margin by participant
-        self.df.boxplot(column='safety_margin', by='participant', ax=axes[0,2])
-        axes[0,2].set_title('Safety Margin by Participant')
-        axes[0,2].set_xlabel('Participant')
+        # Choose the best available safety metric
+        safety_metric = 'safety_margin'
+        safety_label = 'Safety Margin (m)'
         
-        # Total alerts by condition
-        if 'total_alerts' in self.df.columns:
-            sns.barplot(data=self.df, x='condition_clean', y='total_alerts', ax=axes[1,0])
-            axes[1,0].set_title('Average Total Alerts by Condition')
-            axes[1,0].tick_params(axis='x', rotation=45)
+        if self.df['safety_margin'].notna().sum() == 0 or 'safety_margin' not in self.df.columns:
+            if 'minimum_distance' in self.df.columns and self.df['minimum_distance'].notna().sum() > 0:
+                safety_metric = 'minimum_distance'
+                safety_label = 'Minimum Distance (m)'
+                print(f"📊 Using minimum_distance as fallback for safety metric")
+            elif 'safety_score' in self.df.columns and self.df['safety_score'].notna().sum() > 0:
+                safety_metric = 'safety_score'
+                safety_label = 'Safety Score'
+                print(f"📊 Using safety_score as fallback for safety metric")
         
-        # Collision rates by scenario
-        collision_by_scenario = self.df.groupby('scenario_clean')['collision'].mean() * 100
-        collision_by_scenario.plot(kind='bar', ax=axes[1,1])
-        axes[1,1].set_title('Collision Rate by Scenario (%)')
-        axes[1,1].set_ylabel('Collision Rate (%)')
+        safety_data = []
+        condition_labels = []
         
-        # Safety score distribution
-        if 'safety_score' in self.df.columns:
-            self.df['safety_score'].hist(bins=20, ax=axes[1,2])
-            axes[1,2].set_title('Safety Score Distribution')
-            axes[1,2].set_xlabel('Safety Score')
-            axes[1,2].set_ylabel('Frequency')
+        for cond in available_conditions:
+            cond_data = self.df[self.df['condition_clean'] == cond][safety_metric].dropna()
+            if len(cond_data) > 0:
+                safety_data.append(cond_data.values)
+                condition_labels.append(cond)
+        
+        if len(safety_data) > 0:
+            colors = ['#2E8B57', '#4682B4', '#CD5C5C'][:len(condition_labels)]
+            bp1 = ax1.boxplot(safety_data, labels=[c.replace(' ', '\n') for c in condition_labels], 
+                             patch_artist=True, widths=0.6)
+            
+            for patch, color in zip(bp1['boxes'], colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.8)
+            
+            ax1.set_title(f'(a) {safety_label.split("(")[0].strip()}\nby Condition', fontweight='bold')
+            ax1.set_ylabel(safety_label)
+            ax1.set_xlabel('Condition')
+        else:
+            ax1.text(0.5, 0.5, 'No safety data\navailable', ha='center', va='center', 
+                    transform=ax1.transAxes, fontsize=12)
+            ax1.set_title('(a) Safety Metrics by Condition', fontweight='bold')
+            ax1.set_xlabel('Condition')
+            ax1.set_ylabel('Safety Metric')
+        
+        # Collision Rate by Condition
+        collision_rates = self.df.groupby('condition_clean')['collision'].mean() * 100
+        collision_rates = collision_rates.reindex([c for c in condition_order if c in collision_rates.index])
+        
+        bars = ax2.bar(range(len(collision_rates)), collision_rates.values, 
+                      color=colors[:len(collision_rates)], alpha=0.8, width=0.6)
+        ax2.set_title('(b) Collision Rate by Condition', fontweight='bold')
+        ax2.set_ylabel('Collision Rate (%)')
+        ax2.set_xlabel('Condition')
+        ax2.set_xticks(range(len(collision_rates)))
+        ax2.set_xticklabels([c.replace(' ', '\n') for c in collision_rates.index], rotation=0)
+        
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            ax2.text(bar.get_x() + bar.get_width()/2., height + 0.2,
+                    f'{height:.1f}%', ha='center', va='bottom', fontweight='bold', fontsize=6)
         
         plt.tight_layout()
-        if save_plots:
-            plot_file = os.path.join(self.log_directory, f'comprehensive_analysis_overview_{timestamp}.png')
-            plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-            print(f"📊 Saved overview plot: {os.path.basename(plot_file)}")
-        plt.show()
+        fig1_file = os.path.join(self.log_directory, f'ieee_condition_comparison_{timestamp}.png')
+        plt.savefig(fig1_file, dpi=300, bbox_inches='tight')
+        saved_files.append(fig1_file)
+        plt.close()
         
-        # 2. Scenario comparison detailed plot
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle('EV vs PED Scenario Detailed Comparison', fontsize=16)
+        # Figure 2: Scenario Analysis (IEEE 2-column width) 
+        fig2, (ax3, ax4) = plt.subplots(1, 2, figsize=(7.5, 3.5))
         
-        # Safety metrics comparison
-        if len(self.df['scenario_clean'].unique()) >= 2:
-            sns.violinplot(data=self.df, x='scenario_clean', y='safety_margin', ax=axes[0,0])
-            axes[0,0].set_title('Safety Margin Distribution')
+        # Safety Margin by Scenario (using same metric as condition chart)
+        scenarios = sorted(self.df['scenario_clean'].unique())
+        if len(scenarios) >= 1:
+            scenario_data = []
+            scenario_labels = []
             
-            sns.barplot(data=self.df, x='scenario_clean', y='total_alerts', ax=axes[0,1])
-            axes[0,1].set_title('Average Total Alerts')
+            for scen in scenarios:
+                scen_data = self.df[self.df['scenario_clean'] == scen][safety_metric].dropna()
+                if len(scen_data) > 0:
+                    scenario_data.append(scen_data.values)
+                    scenario_labels.append(scen)
             
-            # Collision comparison
-            collision_data = self.df.groupby('scenario_clean')['collision'].agg(['count', 'sum']).reset_index()
-            collision_data['collision_rate'] = collision_data['sum'] / collision_data['count'] * 100
-            sns.barplot(data=collision_data, x='scenario_clean', y='collision_rate', ax=axes[1,0])
-            axes[1,0].set_title('Collision Rate by Scenario (%)')
+            if len(scenario_data) > 0:
+                scenario_colors = ['#FF6B6B', '#4ECDC4'][:len(scenario_labels)]
+                
+                bp2 = ax3.boxplot(scenario_data, labels=scenario_labels, patch_artist=True, widths=0.6)
+                
+                for patch, color in zip(bp2['boxes'], scenario_colors):
+                    patch.set_facecolor(color)
+                    patch.set_alpha(0.8)
+                
+                ax3.set_title(f'(c) {safety_label.split("(")[0].strip()}\nby Scenario', fontweight='bold')
+                ax3.set_ylabel(safety_label)
+                ax3.set_xlabel('Scenario')
+            else:
+                ax3.text(0.5, 0.5, 'No safety data\navailable', ha='center', va='center', 
+                        transform=ax3.transAxes, fontsize=12)
+                ax3.set_title('(c) Safety Metrics by Scenario', fontweight='bold')
+                ax3.set_xlabel('Scenario')
+                ax3.set_ylabel('Safety Metric')
             
-            # Heatmap of conditions vs scenarios
-            heatmap_data = pd.crosstab(self.df['condition_clean'], self.df['scenario_clean'], 
-                                     values=self.df['safety_margin'], aggfunc='mean')
-            sns.heatmap(heatmap_data, annot=True, fmt='.2f', ax=axes[1,1])
-            axes[1,1].set_title('Mean Safety Margin: Condition vs Scenario')
+            # Collision Rate by Scenario
+            scenario_collision = self.df.groupby('scenario_clean')['collision'].mean() * 100
+            bars2 = ax4.bar(range(len(scenario_collision)), scenario_collision.values,
+                           color=scenario_colors[:len(scenario_collision)], alpha=0.8, width=0.6)
+            ax4.set_title('(d) Collision Rate by Scenario', fontweight='bold')
+            ax4.set_ylabel('Collision Rate (%)')
+            ax4.set_xlabel('Scenario')
+            ax4.set_xticks(range(len(scenario_collision)))
+            ax4.set_xticklabels(scenario_collision.index)
+            
+            # Add value labels
+            for bar in bars2:
+                height = bar.get_height()
+                ax4.text(bar.get_x() + bar.get_width()/2., height + 0.2,
+                        f'{height:.1f}%', ha='center', va='bottom', fontweight='bold', fontsize=6)
         
         plt.tight_layout()
-        if save_plots:
-            plot_file = os.path.join(self.log_directory, f'scenario_comparison_{timestamp}.png')
-            plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-            print(f"📊 Saved scenario comparison: {os.path.basename(plot_file)}")
-        plt.show()
+        fig2_file = os.path.join(self.log_directory, f'ieee_scenario_comparison_{timestamp}.png')
+        plt.savefig(fig2_file, dpi=300, bbox_inches='tight')
+        saved_files.append(fig2_file)
+        plt.close()
         
-        # 3. Participant performance matrix
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle('Participant Performance Analysis', fontsize=16)
+        print(f"📊 Saved IEEE format visualizations:")
+        for file in saved_files:
+            print(f"   - {os.path.basename(file)}")
         
-        # Participant performance metrics
-        participant_metrics = self.df.groupby('participant').agg({
-            'safety_margin': 'mean',
-            'safety_score': 'mean',
-            'total_alerts': 'mean',
-            'collision': 'mean'
-        }).round(3)
-        
-        participant_metrics[['safety_margin', 'safety_score']].plot(kind='bar', ax=axes[0,0])
-        axes[0,0].set_title('Safety Metrics by Participant')
-        axes[0,0].legend(['Safety Margin', 'Safety Score'])
-        
-        participant_metrics['total_alerts'].plot(kind='bar', ax=axes[0,1])
-        axes[0,1].set_title('Average Total Alerts by Participant')
-        
-        participant_metrics['collision'].plot(kind='bar', ax=axes[1,0])
-        axes[1,0].set_title('Collision Rate by Participant')
-        axes[1,0].set_ylabel('Collision Rate')
-        
-        # Participant consistency (standard deviation)
-        participant_std = self.df.groupby('participant')['safety_margin'].std()
-        participant_std.plot(kind='bar', ax=axes[1,1])
-        axes[1,1].set_title('Safety Margin Consistency (Lower = More Consistent)')
-        axes[1,1].set_ylabel('Standard Deviation')
-        
-        plt.tight_layout()
-        if save_plots:
-            plot_file = os.path.join(self.log_directory, f'participant_analysis_{timestamp}.png')
-            plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-            print(f"📊 Saved participant analysis: {os.path.basename(plot_file)}")
-        plt.show()
-        
-        print("✅ All visualizations generated")
+        return saved_files
     
     def generate_comprehensive_report(self):
         """Generate a comprehensive analysis report"""
@@ -858,18 +911,29 @@ Participants: {', '.join(sorted(self.df['participant'].unique()))}
             print(f"   ❌ Not statistically significant (p ≥ 0.05)")
 
     def create_interaction_visualizations(self, save_plots: bool = True):
-        """Create visualizations specifically for scenario × condition interactions"""
+        """Create IEEE format interaction visualizations focusing on key insights"""
         print("\n" + "="*70)
-        print("GENERATING INTERACTION-FOCUSED VISUALIZATIONS")
+        print("GENERATING IEEE INTERACTION VISUALIZATIONS")
         print("="*70)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # 1. Collision Rate Heatmap
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle('Critical Safety Insights: Scenario × Condition Interactions', fontsize=16)
+        # Determine the best available safety metric (same logic as comprehensive visualizations)
+        safety_metric = 'safety_margin'
+        safety_label = 'Safety Margin (m)'
         
-        # Collision rate heatmap
+        if self.df['safety_margin'].notna().sum() == 0 or 'safety_margin' not in self.df.columns:
+            if 'minimum_distance' in self.df.columns and self.df['minimum_distance'].notna().sum() > 0:
+                safety_metric = 'minimum_distance'
+                safety_label = 'Minimum Distance (m)'
+            elif 'safety_score' in self.df.columns and self.df['safety_score'].notna().sum() > 0:
+                safety_metric = 'safety_score'
+                safety_label = 'Safety Score'
+        
+        # Figure 3: Critical Interaction Analysis (IEEE 2-column width)
+        fig3, (ax5, ax6) = plt.subplots(1, 2, figsize=(7.5, 3.5))
+        
+        # Collision Rate Heatmap - Most important interaction insight
         collision_matrix = self.df.pivot_table(
             values='collision', 
             index='scenario_clean', 
@@ -877,68 +941,140 @@ Participants: {', '.join(sorted(self.df['participant'].unique()))}
             aggfunc='mean'
         ) * 100
         
+        # Reorder columns to match our hierarchy
+        condition_order = ['Internal Only', 'Fusion', 'External Only']
+        collision_matrix = collision_matrix.reindex(columns=[c for c in condition_order if c in collision_matrix.columns])
+        
         sns.heatmap(collision_matrix, annot=True, fmt='.1f', cmap='Reds', 
-                   ax=axes[0,0], cbar_kws={'label': 'Collision Rate (%)'})
-        axes[0,0].set_title('🚨 Collision Rate by Scenario × Condition')
-        axes[0,0].set_ylabel('Scenario')
+                   ax=ax5, cbar_kws={'label': 'Collision Rate (%)'})
+        ax5.set_title('(e) Collision Rate by\nScenario × Condition', fontweight='bold')
+        ax5.set_ylabel('Scenario')
+        ax5.set_xlabel('Condition')
+        ax5.tick_params(axis='x', rotation=45)
         
-        # Safety margin heatmap
-        safety_matrix = self.df.pivot_table(
-            values='safety_margin', 
-            index='scenario_clean', 
-            columns='condition_clean', 
-            aggfunc='mean'
-        )
-        
-        sns.heatmap(safety_matrix, annot=True, fmt='.1f', cmap='Greens', 
-                   ax=axes[0,1], cbar_kws={'label': 'Safety Margin (m)'})
-        axes[0,1].set_title('🛡️ Safety Margin by Scenario × Condition')
-        
-        # Alert distance comparison
-        alert_matrix = self.df.pivot_table(
-            values='first_alert_distance', 
-            index='scenario_clean', 
-            columns='condition_clean', 
-            aggfunc='mean'
-        )
-        
-        sns.heatmap(alert_matrix, annot=True, fmt='.1f', cmap='Blues', 
-                   ax=axes[1,0], cbar_kws={'label': 'Alert Distance (m)'})
-        axes[1,0].set_title('📏 First Alert Distance by Scenario × Condition')
-        axes[1,0].set_xlabel('Condition')
-        axes[1,0].set_ylabel('Scenario')
-        
-        # Fusion benefit visualization
+        # Driver State Integration Benefits - Key research finding
         fusion_data = []
-        for scenario in ['EV', 'PED']:
+        for scenario in sorted(self.df['scenario_clean'].unique()):
             scenario_data = self.df[self.df['scenario_clean'] == scenario]
-            ext_only = scenario_data[scenario_data['condition_clean'] == 'External Only']['collision'].mean() * 100
-            fusion = scenario_data[scenario_data['condition_clean'] == 'Fusion']['collision'].mean() * 100
-            internal_only = scenario_data[scenario_data['condition_clean'] == 'Internal Only']['collision'].mean() * 100
+            scenario_results = {}
             
-            fusion_data.append({
-                'Scenario': scenario,
-                'External Only': ext_only,
-                'Fusion': fusion,
-                'Internal Only': internal_only
-            })
+            for condition in condition_order:
+                if condition in scenario_data['condition_clean'].unique():
+                    collision_rate = scenario_data[scenario_data['condition_clean'] == condition]['collision'].mean() * 100
+                    scenario_results[condition] = collision_rate
+            
+            scenario_results['Scenario'] = scenario
+            fusion_data.append(scenario_results)
         
-        fusion_df = pd.DataFrame(fusion_data)
-        fusion_df.set_index('Scenario').plot(kind='bar', ax=axes[1,1])
-        axes[1,1].set_title('💡 Driver State Integration Benefits')
-        axes[1,1].set_ylabel('Collision Rate (%)')
-        axes[1,1].set_xlabel('Scenario')
-        axes[1,1].legend(title='Condition')
-        axes[1,1].tick_params(axis='x', rotation=0)
+        fusion_df = pd.DataFrame(fusion_data).set_index('Scenario')
+        
+        # Plot grouped bar chart
+        x = np.arange(len(fusion_df.index))
+        width = 0.25
+        colors = ['#2E8B57', '#4682B4', '#CD5C5C']
+        
+        for i, (condition, color) in enumerate(zip(condition_order, colors)):
+            if condition in fusion_df.columns:
+                values = fusion_df[condition].values
+                bars = ax6.bar(x + i*width, values, width, label=condition, 
+                              color=color, alpha=0.8)
+                
+                # Add value labels on bars
+                for bar, val in zip(bars, values):
+                    if not np.isnan(val):
+                        ax6.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.5,
+                                f'{val:.1f}%', ha='center', va='bottom', fontsize=5)
+        
+        ax6.set_title('(f) Driver State Integration\nBenefits', fontweight='bold')
+        ax6.set_ylabel('Collision Rate (%)')
+        ax6.set_xlabel('Scenario')
+        ax6.set_xticks(x + width)
+        ax6.set_xticklabels(fusion_df.index)
+        ax6.legend(title='Condition', loc='upper left', fontsize=7, frameon=True, 
+                  fancybox=True, shadow=False, ncol=1, bbox_to_anchor=(0.02, 0.98))
         
         plt.tight_layout()
-        if save_plots:
-            plot_file = os.path.join(self.log_directory, f'critical_interactions_analysis_{timestamp}.png')
-            plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-            print(f"📊 Saved critical interactions plot: {os.path.basename(plot_file)}")
-        plt.show()
+        fig3_file = os.path.join(self.log_directory, f'ieee_interaction_analysis_{timestamp}.png')
+        plt.savefig(fig3_file, dpi=300, bbox_inches='tight')
+        plt.close()
         
-        print("✅ Interaction visualizations generated")
+        print(f"📊 Saved IEEE interaction visualization: {os.path.basename(fig3_file)}")
+        
+        # Figure 4: Participant Performance Comparison (IEEE 2-column width)
+        fig4, (ax7, ax8) = plt.subplots(1, 2, figsize=(7.5, 3.5))
+        
+        # Participant Safety Performance
+        participants = sorted(self.df['participant'].unique())
+        if len(participants) > 1:
+            # Safety metric by participant
+            participant_safety_data = []
+            participant_labels = []
+            
+            for participant in participants:
+                p_data = self.df[self.df['participant'] == participant][safety_metric].dropna()
+                if len(p_data) > 0:
+                    participant_safety_data.append(p_data.values)
+                    participant_labels.append(participant)
+            
+            if len(participant_safety_data) > 0:
+                participant_colors = plt.cm.Set3(np.linspace(0, 1, len(participant_labels)))
+                
+                bp3 = ax7.boxplot(participant_safety_data, labels=participant_labels, 
+                                 patch_artist=True, widths=0.6)
+                
+                for patch, color in zip(bp3['boxes'], participant_colors):
+                    patch.set_facecolor(color)
+                    patch.set_alpha(0.8)
+                
+                ax7.set_title(f'(g) {safety_label.split("(")[0].strip()}\nby Participant', fontweight='bold')
+                ax7.set_ylabel(safety_label)
+                ax7.set_xlabel('Participant')
+                ax7.tick_params(axis='x', rotation=45)
+            else:
+                ax7.text(0.5, 0.5, 'No safety data\navailable', ha='center', va='center', 
+                        transform=ax7.transAxes, fontsize=12)
+                ax7.set_title('(g) Safety by Participant', fontweight='bold')
+            
+            # Collision Rate by Participant
+            participant_collision = self.df.groupby('participant')['collision'].agg(['count', 'sum']).reset_index()
+            participant_collision = participant_collision[participant_collision['count'] > 0]  # Only participants with data
+            participant_collision['collision_rate'] = (participant_collision['sum'] / participant_collision['count']) * 100
+            
+            if len(participant_collision) > 0:
+                bars3 = ax8.bar(range(len(participant_collision)), participant_collision['collision_rate'].values,
+                               color=participant_colors[:len(participant_collision)], alpha=0.8, width=0.6)
+                ax8.set_title('(h) Collision Rate by Participant', fontweight='bold')
+                ax8.set_ylabel('Collision Rate (%)')
+                ax8.set_xlabel('Participant')
+                ax8.set_xticks(range(len(participant_collision)))
+                ax8.set_xticklabels(participant_collision['participant'].values, rotation=45)
+                
+                # Add value labels on bars
+                for bar, rate in zip(bars3, participant_collision['collision_rate'].values):
+                    ax8.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.5,
+                            f'{rate:.1f}%', ha='center', va='bottom', fontweight='bold', fontsize=5)
+            else:
+                ax8.text(0.5, 0.5, 'No collision data\navailable', ha='center', va='center', 
+                        transform=ax8.transAxes, fontsize=12)
+                ax8.set_title('(h) Collision Rate by Participant', fontweight='bold')
+        else:
+            # Single participant case
+            ax7.text(0.5, 0.5, 'Only one participant\nin dataset', ha='center', va='center', 
+                    transform=ax7.transAxes, fontsize=12)
+            ax7.set_title('(g) Safety by Participant', fontweight='bold')
+            
+            ax8.text(0.5, 0.5, 'Only one participant\nin dataset', ha='center', va='center', 
+                    transform=ax8.transAxes, fontsize=12)
+            ax8.set_title('(h) Collision Rate by Participant', fontweight='bold')
+        
+        plt.tight_layout()
+        fig4_file = os.path.join(self.log_directory, f'ieee_participant_comparison_{timestamp}.png')
+        plt.savefig(fig4_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"📊 Saved IEEE participant comparison: {os.path.basename(fig4_file)}")
+        
+        return [fig3_file, fig4_file]
 
 def main():
     """Main execution function"""
@@ -966,8 +1102,13 @@ def main():
         analyzer.driver_attentiveness_necessity_analysis()
         
         # Generate visualizations
-        analyzer.create_comprehensive_visualizations()
-        analyzer.create_interaction_visualizations()
+        basic_viz_files = analyzer.create_comprehensive_visualizations()
+        interaction_viz_files = analyzer.create_interaction_visualizations()
+        
+        print(f"\n📊 All IEEE format visualizations generated:")
+        all_viz_files = basic_viz_files + (interaction_viz_files if isinstance(interaction_viz_files, list) else [interaction_viz_files])
+        for viz_file in all_viz_files:
+            print(f"   - {os.path.basename(viz_file)}")
         
         # Generate and display report
         report = analyzer.generate_comprehensive_report()

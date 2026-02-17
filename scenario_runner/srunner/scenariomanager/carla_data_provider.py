@@ -31,6 +31,43 @@ def calculate_velocity(actor):
     return math.sqrt(velocity_squared)
 
 
+def _create_global_route_planner(carla_map, sampling_resolution=2.0):
+    """
+    Create GlobalRoutePlanner with a compatibility fallback for environments
+    where constructor-time waypoint sampling can raise a Boost type error.
+    """
+    resolution = float(sampling_resolution)
+    try:
+        return GlobalRoutePlanner(carla_map, resolution)
+    except Exception as exc:  # pylint: disable=broad-except
+        # Some CARLA PythonAPI mixes can trigger:
+        # Waypoint.next(Waypoint, list) ... expected double distance
+        if "Waypoint.next" not in str(exc):
+            raise
+
+        print("[CarlaDataProvider] GlobalRoutePlanner constructor failed; applying compatibility fallback")
+        grp = GlobalRoutePlanner.__new__(GlobalRoutePlanner)
+        grp._sampling_resolution = resolution
+        grp._wmap = carla_map
+        grp._topology = None
+        grp._graph = None
+        grp._id_map = None
+        grp._road_id_to_edge = None
+        grp._intersection_end_node = -1
+
+        try:
+            from agents.navigation.local_planner import RoadOption
+            grp._previous_decision = RoadOption.VOID
+        except Exception:  # pylint: disable=broad-except
+            grp._previous_decision = None
+
+        grp._build_topology()
+        grp._build_graph()
+        grp._find_loose_ends()
+        grp._lane_change_link()
+        return grp
+
+
 class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
 
     """
@@ -210,7 +247,7 @@ class CarlaDataProvider(object):  # pylint: disable=too-many-public-methods
         CarlaDataProvider._sync_flag = world.get_settings().synchronous_mode
         CarlaDataProvider._map = world.get_map()
         CarlaDataProvider._blueprint_library = world.get_blueprint_library()
-        CarlaDataProvider._grp = GlobalRoutePlanner(CarlaDataProvider._map, 2.0)
+        CarlaDataProvider._grp = _create_global_route_planner(CarlaDataProvider._map, 2.0)
         CarlaDataProvider.generate_spawn_points()
         CarlaDataProvider.prepare_map()
 

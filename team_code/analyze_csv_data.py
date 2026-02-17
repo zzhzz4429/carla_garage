@@ -51,6 +51,97 @@ class ExperimentCSVAnalyzer:
                 self.df[col] = pd.to_numeric(self.df[col], errors='coerce')
         
         print("✅ Data prepared for analysis")
+
+    # ------------------------------------------------------------------ #
+    # EV-specific metrics (excluding maneuver delay)
+    # ------------------------------------------------------------------ #
+    def ev_metrics(self, g_threshold: float = 10.0, lateral_tol: float = 1.2):
+        """
+        Compute EV-only metrics:
+          - unsafe_lane_change (bool) [if rear_gaps available]
+          - min_rear_gap_at_lc (meters) [if rear_gaps available]
+          - rear_vehicle_count_at_lc [if rear_gaps available]
+          - ev_min_distance, ev_peak_risk, ev_alert_count, ev_first_alert_time (from runtime logs)
+        Assumes the CSV contains per-trial columns:
+          lane_change_time, target_lane ('left'/'right'), rear_gaps (list/str) [optional],
+          ev_min_distance, ev_peak_risk, ev_alert_count, ev_first_alert_time (optional),
+          and condition contains 'EV' to filter EV trials.
+        """
+        df = self.df.copy()
+        ev_mask = df['condition'].str.contains('EV', case=False, na=False)
+        ev_df = df[ev_mask].copy()
+
+        # Parse rear_gaps if stored as stringified list
+        def _parse_gaps(x):
+            if isinstance(x, (list, tuple, np.ndarray)):
+                return [float(v) for v in x]
+            if isinstance(x, str):
+                try:
+                    # Allow comma-separated or repr of list
+                    x_clean = x.strip().strip('[]')
+                    if not x_clean:
+                        return []
+                    return [float(v) for v in x_clean.split(',')]
+                except Exception:
+                    return []
+            return []
+
+        if 'rear_gaps' in ev_df.columns:
+            ev_df['rear_gaps'] = ev_df['rear_gaps'].apply(_parse_gaps)
+        else:
+            ev_df['rear_gaps'] = [[] for _ in range(len(ev_df))]
+
+        min_gaps = []
+        rv_counts = []
+        unsafe_flags = []
+        for gaps in ev_df['rear_gaps']:
+            if gaps:
+                mg = min(gaps)
+                min_gaps.append(mg)
+                rv_counts.append(len(gaps))
+                unsafe_flags.append(mg < g_threshold)
+            else:
+                min_gaps.append(np.nan)
+                rv_counts.append(0)
+                unsafe_flags.append(False)
+
+        ev_df['min_rear_gap_at_lc'] = min_gaps
+        ev_df['rear_vehicle_count_at_lc'] = rv_counts
+        ev_df['unsafe_lane_change'] = unsafe_flags
+
+        # EV runtime metrics if present
+        if 'ev_min_distance' in ev_df.columns:
+            ev_df['ev_min_distance'] = pd.to_numeric(ev_df['ev_min_distance'], errors='coerce')
+        if 'ev_peak_risk' in ev_df.columns:
+            ev_df['ev_peak_risk'] = pd.to_numeric(ev_df['ev_peak_risk'], errors='coerce')
+        if 'ev_alert_count' in ev_df.columns:
+            ev_df['ev_alert_count'] = pd.to_numeric(ev_df['ev_alert_count'], errors='coerce')
+
+        # Aggregate summaries
+        summary = {
+            'trials': len(ev_df),
+            'unsafe_rate_pct': 100.0 * ev_df['unsafe_lane_change'].mean() if len(ev_df) else np.nan,
+            'min_rear_gap_mean': np.nanmean(ev_df['min_rear_gap_at_lc']) if len(ev_df) else np.nan,
+            'min_rear_gap_median': np.nanmedian(ev_df['min_rear_gap_at_lc']) if len(ev_df) else np.nan,
+            'rear_vehicle_count_mean': np.nanmean(ev_df['rear_vehicle_count_at_lc']) if len(ev_df) else np.nan,
+            'ev_min_distance_mean': np.nanmean(ev_df['ev_min_distance']) if 'ev_min_distance' in ev_df.columns else np.nan,
+            'ev_peak_risk_mean': np.nanmean(ev_df['ev_peak_risk']) if 'ev_peak_risk' in ev_df.columns else np.nan,
+            'ev_alert_count_mean': np.nanmean(ev_df['ev_alert_count']) if 'ev_alert_count' in ev_df.columns else np.nan,
+        }
+
+        print("\n=== EV Scenario Metrics (position-only rear-gap check) ===")
+        print(f"Trials: {summary['trials']}")
+        print(f"Unsafe lane-change rate: {summary['unsafe_rate_pct']:.1f}% (gap<thr={g_threshold} m)")
+        print(f"Min rear gap at LC: mean {summary['min_rear_gap_mean']:.2f} m, median {summary['min_rear_gap_median']:.2f} m")
+        print(f"Rear vehicle count at LC: mean {summary['rear_vehicle_count_mean']:.2f}")
+        if 'ev_min_distance' in ev_df.columns:
+            print(f"EV min distance: mean {summary['ev_min_distance_mean']:.2f} m")
+        if 'ev_peak_risk' in ev_df.columns:
+            print(f"EV peak risk: mean {summary['ev_peak_risk_mean']:.2f}")
+        if 'ev_alert_count' in ev_df.columns:
+            print(f"EV alert count: mean {summary['ev_alert_count_mean']:.2f}")
+
+        return ev_df, summary
     
     def descriptive_statistics(self):
         """Generate comprehensive descriptive statistics"""
